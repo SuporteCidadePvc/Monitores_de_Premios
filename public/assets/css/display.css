@@ -156,7 +156,7 @@ body[data-screen="principal"] .display-header {
 .dashboard-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-template-rows: minmax(0, 1.86fr) minmax(0, 0.9fr);
+    grid-template-rows: minmax(0, 1fr);
     gap: clamp(24px, 3.9vw, 76px);
     min-height: 0;
 }
@@ -853,7 +853,7 @@ body[data-screen="principal"] .display-footer {
 
     body[data-screen="principal"] .dashboard-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
-        grid-template-rows: minmax(0, 1.86fr) minmax(0, 0.9fr);
+        grid-template-rows: minmax(0, 1fr);
         gap: 12px;
     }
 

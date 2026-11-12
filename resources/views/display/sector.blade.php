@@ -140,22 +140,6 @@
                     @endif
                 </article>
 
-                <article class="dashboard-card dashboard-card--history" aria-labelledby="prize-history-title">
-                    <h2 id="prize-history-title">6 Últimos Registos de Prémios</h2>
-
-                    <table class="prize-history-table" data-prize-history-unavailable="true">
-                        <caption>Histórico de prémios</caption>
-                        <thead>
-                            <tr>
-                                <th>Ano</th>
-                                <th>Mês</th>
-                                <th>Prémio Médio (€)</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
-                </article>
-
                 <article class="dashboard-card dashboard-card--squares" aria-labelledby="squares-title">
                     <h2 id="squares-title">QUADROS</h2>
                     <strong data-production-squares>{{ number_format($snapshot->squares, 0, ',', '.') }}</strong>
@@ -163,24 +147,6 @@
                     <span class="visually-hidden">Caixilhos: <span data-production-frames>{{ number_format($snapshot->frames, 0, ',', '.') }}</span></span>
                 </article>
 
-                <article class="dashboard-card dashboard-card--calculation" aria-labelledby="calculation-title">
-                    <h2 id="calculation-title">Exemplo de cálculo:</h2>
-
-                    @if ($prizePool)
-                        <p>
-                            Prémio global atual:
-                            <strong data-prize-pool>
-                                {{ number_format($prizePool->poolCents / 100, 2, ',', ' ') }} €
-                                <span class="visually-hidden">{{ number_format($prizePool->poolCents / 100, 0, ',', '.') }} €</span>
-                            </strong>
-                        </p>
-                        <p>O valor individual é calculado proporcionalmente às horas trabalhadas no mês.</p>
-                        <p class="calculation-formula">Prémio individual = prémio global ÷ horas totais × horas individuais</p>
-                        <small data-prize-rule-version>Regra {{ $prizePool->ruleVersion }}</small>
-                    @else
-                        <p>O prémio individual é calculado proporcionalmente às horas trabalhadas no mês.</p>
-                    @endif
-                </article>
             </section>
 
             <footer class="display-footer">

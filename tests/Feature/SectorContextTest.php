@@ -51,20 +51,22 @@ class SectorContextTest extends TestCase
             ->assertDontSee('/pvc/', false);
     }
 
-    public function test_monthly_panel_renders_the_server_selected_prize_pool_and_rule_version(): void
+    public function test_monthly_panel_shows_only_prize_tiers_and_squares_with_the_current_tier_highlighted(): void
     {
         $this->productionRepository->squares = 2990.0;
 
         $this->get('/pvc')
             ->assertOk()
-            ->assertSee('data-prize-pool', false)
             ->assertSee('dashboard-grid', false)
-            ->assertSee('Tabela de Prémios')
-            ->assertSee('6 Últimos Registos de Prémios')
-            ->assertSee('data-prize-history-unavailable', false)
-            ->assertSee('Exemplo de cálculo:')
-            ->assertSee('2.700 €')
-            ->assertSee('premio-producao-v1');
+            ->assertSeeInOrder(['Tabela de Prémios', 'QUADROS'])
+            ->assertSee('data-production-squares', false)
+            ->assertSee('2.990')
+            ->assertSee('class="is-current-tier"', false)
+            ->assertSee('2 700,00 €')
+            ->assertDontSee('6 Últimos Registos de Prémios')
+            ->assertDontSee('data-prize-history-unavailable', false)
+            ->assertDontSee('Exemplo de cálculo:')
+            ->assertDontSee('data-prize-pool', false);
     }
 
     public function test_aluminium_main_panel_uses_its_administrative_prize_tiers(): void
@@ -75,8 +77,10 @@ class SectorContextTest extends TestCase
             ->assertOk()
             ->assertSee('&gt; 800', false)
             ->assertSee('1 600,00 €')
-            ->assertSee('definidos por escalão para o setor de Alumínio')
-            ->assertDontSee('horas trabalhadas no mês');
+            ->assertSeeInOrder(['Tabela de Prémios', 'QUADROS'])
+            ->assertSee('data-production-squares', false)
+            ->assertDontSee('dashboard-card--history', false)
+            ->assertDontSee('dashboard-card--calculation', false);
     }
 
     public function test_daily_panel_does_not_present_a_monthly_prize_as_a_daily_prize(): void
