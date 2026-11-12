@@ -1,0 +1,41 @@
+<?php
+
+namespace App\Domain\Admin;
+
+use App\Domain\Announcements\AnnouncementFile;
+
+interface AdminManagementRepository
+{
+    /** @return array{rules:list<array<string, mixed>>,announcements:list<array<string, mixed>>,audit:list<array<string, mixed>>} */
+    public function dashboard(): array;
+
+    public function createPrizeRule(string $sectorKey, int $minimumSquares, int $prizePoolCents, AdminUser $actor): void;
+
+    public function updatePrizeRule(int $id, int $minimumSquares, int $prizePoolCents, AdminUser $actor): void;
+
+    public function deactivatePrizeRule(int $id, AdminUser $actor): void;
+
+    public function deletePrizeRule(int $id, AdminUser $actor): void;
+
+    /**
+     * The attachment file must already be in storage; the caller removes it if this throws.
+     */
+    public function createAnnouncement(string $scope, string $title, string $body, string $startsAt, ?string $endsAt, AdminUser $actor, ?AnnouncementFile $attachment = null): void;
+
+    /**
+     * A new attachment replaces the current one; $removeAttachment removes it without replacement.
+     *
+     * @return string|null Stored name of the attachment unlinked by this update, to delete after commit.
+     */
+    public function updateAnnouncement(int $id, string $scope, string $title, string $body, string $startsAt, ?string $endsAt, AdminUser $actor, ?AnnouncementFile $newAttachment = null, bool $removeAttachment = false): ?string;
+
+    public function deactivateAnnouncement(int $id, AdminUser $actor): void;
+
+    /**
+     * @return string|null Stored name of the removed attachment, to delete after commit.
+     */
+    public function deleteAnnouncement(int $id, AdminUser $actor): ?string;
+
+    /** @return list<string> Stored names of every attachment linked to an announcement. */
+    public function announcementAttachmentNames(): array;
+}

@@ -1,0 +1,155 @@
+<?php
+
+namespace App\Infrastructure\SqlServer;
+
+use App\Domain\Announcements\Announcement;
+use App\Domain\Announcements\AnnouncementAttachment;
+use App\Domain\Announcements\AnnouncementRepository;
+use App\Domain\Announcements\AnnouncementScope;
+use App\Domain\Announcements\Exceptions\AnnouncementDataUnavailable;
+use App\Domain\Display\SectorContext;
+use App\Infrastructure\SqlServer\Exceptions\DashboardConnectionUnavailable;
+use DateTimeImmutable;
+use DateTimeZone;
+use PDO;
+use Throwable;
+
+final readonly class SqlServerAnnouncementRepository implements AnnouncementRepository
+{
+    private const ACTIVE_ANNOUNCEMENT_QUERY = <<<'SQL'
+        SELECT TOP (1)
+            announcement.AnnouncementId,
+            announcement.AnnouncementScope,
+            sector.SectorKey,
+            announcement.Title,
+            announcement.Body,
+            announcement.StartsAt,
+            announcement.EndsAt,
+            announcement.IsActive,
+            attachment.AttachmentId,
+            attachment.StoredName,
+            attachment.OriginalName,
+            attachment.MimeType,
+            attachment.SizeBytes,
+            attachment.Sha256,
+            attachment.Width,
+            attachment.Height
+        FROM dbo.MonitorDePremios_Comunicados AS announcement
+        LEFT JOIN dbo.MonitorDePremios_Setores AS sector ON sector.SectorId = announcement.SectorId
+        LEFT JOIN dbo.MonitorDePremios_Comunicados_Anexos AS attachment ON attachment.AnnouncementId = announcement.AnnouncementId
+        WHERE announcement.IsActive = 1
+          AND announcement.StartsAt <= ?
+          AND (announcement.EndsAt IS NULL OR announcement.EndsAt > ?)
+          AND (
+              announcement.AnnouncementScope = 'global'
+              OR (announcement.AnnouncementScope = ? AND sector.SectorKey = ?)
+          )
+        ORDER BY
+            CASE WHEN announcement.AnnouncementScope = ? THEN 0 ELSE 1 END,
+            announcement.StartsAt DESC,
+            announcement.AnnouncementId DESC
+        SQL;
+
+    private const VISIBLE_ATTACHMENT_QUERY = <<<'SQL'
+        SELECT
+            attachment.AttachmentId,
+            attachment.StoredName,
+            attachment.OriginalName,
+            attachment.MimeType,
+            attachment.SizeBytes,
+            attachment.Sha256,
+            attachment.Width,
+            attachment.Height
+        FROM dbo.MonitorDePremios_Comunicados_Anexos AS attachment
+        INNER JOIN dbo.MonitorDePremios_Comunicados AS announcement ON announcement.AnnouncementId = attachment.AnnouncementId
+        WHERE announcement.AnnouncementId = ?
+          AND announcement.IsActive = 1
+          AND announcement.StartsAt <= ?
+          AND (announcement.EndsAt IS NULL OR announcement.EndsAt > ?)
+        SQL;
+
+    public function __construct(private DashboardOdbcConnectionFactory $connectionFactory) {}
+
+    public function activeFor(SectorContext $sector, DateTimeImmutable $at): ?Announcement
+    {
+        try {
+            $statement = $this->connectionFactory->connection()->prepare(self::ACTIVE_ANNOUNCEMENT_QUERY);
+            $timestamp = $at->format('Y-m-d H:i:s');
+            $statement->bindValue(1, $timestamp, PDO::PARAM_STR);
+            $statement->bindValue(2, $timestamp, PDO::PARAM_STR);
+            $statement->bindValue(3, $sector->key, PDO::PARAM_STR);
+            $statement->bindValue(4, $sector->key, PDO::PARAM_STR);
+            $statement->bindValue(5, $sector->key, PDO::PARAM_STR);
+            $statement->execute();
+
+            $row = $statement->fetch();
+
+            if (! is_array($row)) {
+                return null;
+            }
+
+            $row = array_change_key_case($row, CASE_LOWER);
+
+            return new Announcement(
+                id: (int) ($row['announcementid'] ?? 0),
+                scope: AnnouncementScope::from((string) ($row['announcementscope'] ?? '')),
+                sectorKey: isset($row['sectorkey']) ? (string) $row['sectorkey'] : null,
+                title: (string) ($row['title'] ?? ''),
+                body: (string) ($row['body'] ?? ''),
+                startsAt: $this->toLisbonDateTime((string) ($row['startsat'] ?? '')),
+                endsAt: isset($row['endsat']) ? $this->toLisbonDateTime((string) $row['endsat']) : null,
+                isActive: (bool) ($row['isactive'] ?? false),
+                attachment: $this->attachment($row),
+            );
+        } catch (DashboardConnectionUnavailable $exception) {
+            throw AnnouncementDataUnavailable::duringConnection($exception->odbcSqlState);
+        } catch (Throwable $exception) {
+            throw AnnouncementDataUnavailable::duringQuery(OdbcDiagnosticCode::from($exception));
+        }
+    }
+
+    public function visibleAttachment(int $announcementId, DateTimeImmutable $at): ?AnnouncementAttachment
+    {
+        try {
+            $statement = $this->connectionFactory->connection()->prepare(self::VISIBLE_ATTACHMENT_QUERY);
+            $timestamp = $at->format('Y-m-d H:i:s');
+            $statement->bindValue(1, $announcementId, PDO::PARAM_INT);
+            $statement->bindValue(2, $timestamp, PDO::PARAM_STR);
+            $statement->bindValue(3, $timestamp, PDO::PARAM_STR);
+            $statement->execute();
+
+            $row = $statement->fetch();
+            $statement->closeCursor();
+
+            return is_array($row) ? $this->attachment(array_change_key_case($row, CASE_LOWER)) : null;
+        } catch (DashboardConnectionUnavailable $exception) {
+            throw AnnouncementDataUnavailable::duringConnection($exception->odbcSqlState);
+        } catch (Throwable $exception) {
+            throw AnnouncementDataUnavailable::duringQuery(OdbcDiagnosticCode::from($exception));
+        }
+    }
+
+    /** @param array<string, mixed> $row */
+    private function attachment(array $row): ?AnnouncementAttachment
+    {
+        if (! isset($row['attachmentid'])) {
+            return null;
+        }
+
+        return new AnnouncementAttachment(
+            id: (int) $row['attachmentid'],
+            storedName: (string) ($row['storedname'] ?? ''),
+            originalName: (string) ($row['originalname'] ?? ''),
+            mimeType: (string) ($row['mimetype'] ?? ''),
+            sizeBytes: (int) ($row['sizebytes'] ?? 0),
+            sha256: (string) ($row['sha256'] ?? ''),
+            width: isset($row['width']) ? (int) $row['width'] : null,
+            height: isset($row['height']) ? (int) $row['height'] : null,
+        );
+    }
+
+    private function toLisbonDateTime(string $value): DateTimeImmutable
+    {
+        return new DateTimeImmutable($value, new DateTimeZone((string) config('production.timezone')));
+    }
+}

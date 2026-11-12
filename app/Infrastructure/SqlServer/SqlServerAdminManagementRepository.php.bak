@@ -1,0 +1,305 @@
+<?php
+
+namespace App\Infrastructure\SqlServer;
+
+use App\Domain\Admin\AdminManagementRepository;
+use App\Domain\Admin\AdminUser;
+use App\Domain\Admin\Exceptions\AdminDataUnavailable;
+use App\Domain\Admin\Exceptions\AdminOperationFailed;
+use App\Infrastructure\SqlServer\Exceptions\DashboardConnectionUnavailable;
+use PDO;
+use PDOException;
+use Throwable;
+
+final readonly class SqlServerAdminManagementRepository implements AdminManagementRepository
+{
+    public function __construct(private DashboardOdbcConnectionFactory $connectionFactory) {}
+
+    public function dashboard(): array
+    {
+        try {
+            $connection = $this->connectionFactory->connection();
+
+            return [
+                'rules' => $this->rows($connection->query(<<<'SQL'
+                    SELECT prize_rule.PrizeRuleId, sector.SectorKey, prize_rule.RuleVersion, prize_rule.MinimumSquares,
+                           prize_rule.PrizePoolCents, prize_rule.Currency, prize_rule.IsActive, prize_rule.CreatedAt
+                    FROM dbo.MonitorDePremios_Regras_Premio AS prize_rule
+                    INNER JOIN dbo.MonitorDePremios_Setores AS sector ON sector.SectorId = prize_rule.SectorId
+                    ORDER BY sector.SectorKey, prize_rule.IsActive DESC, prize_rule.MinimumSquares
+                    SQL)),
+                'announcements' => $this->rows($connection->query(<<<'SQL'
+                    SELECT announcement.AnnouncementId, announcement.AnnouncementScope, sector.SectorKey,
+                           announcement.Title, announcement.Body, announcement.StartsAt, announcement.EndsAt,
+                           announcement.IsActive, announcement.UpdatedAt
+                    FROM dbo.MonitorDePremios_Comunicados AS announcement
+                    LEFT JOIN dbo.MonitorDePremios_Setores AS sector ON sector.SectorId = announcement.SectorId
+                    ORDER BY announcement.IsActive DESC, announcement.StartsAt DESC, announcement.AnnouncementId DESC
+                    SQL)),
+                'audit' => $this->rows($connection->query(<<<'SQL'
+                    SELECT TOP (30) OccurredAt, ActionName, EntityType, EntityId, ActorLabel, MetadataJson
+                    FROM dbo.MonitorDePremios_Auditoria
+                    ORDER BY AuditId DESC
+                    SQL)),
+            ];
+        } catch (DashboardConnectionUnavailable|PDOException $exception) {
+            throw new AdminDataUnavailable('The administrative database is unavailable.', 0, $exception);
+        } catch (Throwable $exception) {
+            throw new AdminDataUnavailable('The administrative information could not be read.', 0, $exception);
+        }
+    }
+
+    public function createPrizeRule(string $sectorKey, int $minimumSquares, int $prizePoolCents, AdminUser $actor): void
+    {
+        $this->transaction(function (PDO $connection) use ($sectorKey, $minimumSquares, $prizePoolCents, $actor): void {
+            $sector = $this->sector($connection, $sectorKey);
+            $statement = $connection->prepare(<<<'SQL'
+                INSERT INTO dbo.MonitorDePremios_Regras_Premio
+                    (SectorId, RuleVersion, MinimumSquares, PrizePoolCents, Currency, IsActive)
+                VALUES (?, 'premio-producao-v1', ?, ?, 'EUR', 1)
+                SQL);
+            $statement->execute([$sector['id'], $minimumSquares, $prizePoolCents]);
+            $id = (int) $connection->query('SELECT CAST(SCOPE_IDENTITY() AS BIGINT)')->fetchColumn();
+            $this->audit($connection, 'prize_rule.created', 'prize_rule', $id, (int) $sector['id'], $actor, [
+                'minimum_squares' => $minimumSquares,
+                'prize_pool_cents' => $prizePoolCents,
+            ]);
+        });
+    }
+
+    public function updatePrizeRule(int $id, int $minimumSquares, int $prizePoolCents, AdminUser $actor): void
+    {
+        $this->transaction(function (PDO $connection) use ($id, $minimumSquares, $prizePoolCents, $actor): void {
+            $statement = $connection->prepare(<<<'SQL'
+                UPDATE prize_rule
+                SET MinimumSquares = ?, PrizePoolCents = ?
+                OUTPUT inserted.SectorId
+                FROM dbo.MonitorDePremios_Regras_Premio AS prize_rule
+                WHERE prize_rule.PrizeRuleId = ? AND prize_rule.IsActive = 1
+                SQL);
+            $statement->execute([$minimumSquares, $prizePoolCents, $id]);
+            $sectorIds = $statement->fetchAll(PDO::FETCH_COLUMN);
+
+            if (! is_array($sectorIds) || count($sectorIds) !== 1) {
+                throw new AdminOperationFailed('The prize rule was not active.');
+            }
+
+            $this->audit($connection, 'prize_rule.updated', 'prize_rule', $id, (int) $sectorIds[0], $actor, [
+                'minimum_squares' => $minimumSquares,
+                'prize_pool_cents' => $prizePoolCents,
+            ]);
+        });
+    }
+
+    public function deactivatePrizeRule(int $id, AdminUser $actor): void
+    {
+        $this->transaction(function (PDO $connection) use ($id, $actor): void {
+            $statement = $connection->prepare(<<<'SQL'
+                UPDATE prize_rule
+                SET IsActive = 0
+                OUTPUT inserted.SectorId
+                FROM dbo.MonitorDePremios_Regras_Premio AS prize_rule
+                WHERE prize_rule.PrizeRuleId = ? AND prize_rule.IsActive = 1
+                SQL);
+            $statement->execute([$id]);
+            $sectorId = $statement->fetchColumn();
+
+            if ($sectorId === false) {
+                throw new AdminOperationFailed('The prize rule was not active.');
+            }
+
+            $this->audit($connection, 'prize_rule.deactivated', 'prize_rule', $id, (int) $sectorId, $actor, []);
+        });
+    }
+
+    public function deletePrizeRule(int $id, AdminUser $actor): void
+    {
+        $this->transaction(function (PDO $connection) use ($id, $actor): void {
+            $statement = $connection->prepare(<<<'SQL'
+                DELETE FROM prize_rule
+                OUTPUT deleted.SectorId
+                FROM dbo.MonitorDePremios_Regras_Premio AS prize_rule
+                WHERE prize_rule.PrizeRuleId = ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM dbo.MonitorDePremios_Premios_Mensais AS monthly_prize
+                      WHERE monthly_prize.AppliedPrizeRuleId = prize_rule.PrizeRuleId
+                  )
+                SQL);
+            $statement->execute([$id]);
+            $sectorIds = $statement->fetchAll(PDO::FETCH_COLUMN);
+
+            if (! is_array($sectorIds) || count($sectorIds) !== 1) {
+                throw new AdminOperationFailed('The prize rule could not be deleted.');
+            }
+
+            $this->audit($connection, 'prize_rule.deleted', 'prize_rule', $id, (int) $sectorIds[0], $actor, []);
+        });
+    }
+
+    public function createAnnouncement(string $scope, string $title, string $body, string $startsAt, ?string $endsAt, AdminUser $actor): void
+    {
+        $this->transaction(function (PDO $connection) use ($scope, $title, $body, $startsAt, $endsAt, $actor): void {
+            $sectorId = $scope === 'global' ? null : (int) $this->sector($connection, $scope)['id'];
+            $statement = $connection->prepare(<<<'SQL'
+                INSERT INTO dbo.MonitorDePremios_Comunicados
+                    (AnnouncementScope, SectorId, Title, Body, StartsAt, EndsAt, IsActive)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                SQL);
+            $statement->execute([$scope, $sectorId, $title, $body, $startsAt, $endsAt]);
+            $id = (int) $connection->query('SELECT CAST(SCOPE_IDENTITY() AS BIGINT)')->fetchColumn();
+            $this->audit($connection, 'announcement.created', 'announcement', $id, $sectorId, $actor, [
+                'scope' => $scope,
+                'starts_at' => $startsAt,
+                'ends_at' => $endsAt,
+            ]);
+        });
+    }
+
+    public function deactivateAnnouncement(int $id, AdminUser $actor): void
+    {
+        $this->transaction(function (PDO $connection) use ($id, $actor): void {
+            $statement = $connection->prepare(<<<'SQL'
+                UPDATE announcement
+                SET IsActive = 0, UpdatedAt = SYSUTCDATETIME()
+                OUTPUT inserted.SectorId
+                FROM dbo.MonitorDePremios_Comunicados AS announcement
+                WHERE announcement.AnnouncementId = ? AND announcement.IsActive = 1
+                SQL);
+            $statement->execute([$id]);
+            $sectorId = $statement->fetchColumn();
+
+            if ($sectorId === false) {
+                throw new AdminOperationFailed('The announcement was not active.');
+            }
+
+            $this->audit($connection, 'announcement.deactivated', 'announcement', $id, $sectorId === null ? null : (int) $sectorId, $actor, []);
+        });
+    }
+
+    public function updateAnnouncement(int $id, string $scope, string $title, string $body, string $startsAt, ?string $endsAt, AdminUser $actor): void
+    {
+        $this->transaction(function (PDO $connection) use ($id, $scope, $title, $body, $startsAt, $endsAt, $actor): void {
+            $sectorId = $scope === 'global' ? null : (int) $this->sector($connection, $scope)['id'];
+            $statement = $connection->prepare(<<<'SQL'
+                UPDATE announcement
+                SET AnnouncementScope = ?, SectorId = ?, Title = ?, Body = ?, StartsAt = ?, EndsAt = ?, UpdatedAt = SYSUTCDATETIME()
+                OUTPUT inserted.SectorId
+                FROM dbo.MonitorDePremios_Comunicados AS announcement
+                WHERE announcement.AnnouncementId = ? AND announcement.IsActive = 1
+                SQL);
+            $statement->execute([$scope, $sectorId, $title, $body, $startsAt, $endsAt, $id]);
+            $sectorIds = $statement->fetchAll(PDO::FETCH_COLUMN);
+
+            if (! is_array($sectorIds) || count($sectorIds) !== 1) {
+                throw new AdminOperationFailed('The announcement was not active.');
+            }
+
+            $savedSectorId = $sectorIds[0] === null ? null : (int) $sectorIds[0];
+            $this->audit($connection, 'announcement.updated', 'announcement', $id, $savedSectorId, $actor, [
+                'scope' => $scope,
+                'starts_at' => $startsAt,
+                'ends_at' => $endsAt,
+            ]);
+        });
+    }
+
+    public function deleteAnnouncement(int $id, AdminUser $actor): void
+    {
+        $this->transaction(function (PDO $connection) use ($id, $actor): void {
+            $statement = $connection->prepare(<<<'SQL'
+                DELETE FROM announcement
+                OUTPUT deleted.SectorId
+                FROM dbo.MonitorDePremios_Comunicados AS announcement
+                WHERE announcement.AnnouncementId = ?
+                SQL);
+            $statement->execute([$id]);
+            $sectorIds = $statement->fetchAll(PDO::FETCH_COLUMN);
+
+            if (! is_array($sectorIds) || count($sectorIds) !== 1) {
+                throw new AdminOperationFailed('The announcement could not be deleted.');
+            }
+
+            $sectorId = $sectorIds[0] === null ? null : (int) $sectorIds[0];
+            $this->audit($connection, 'announcement.deleted', 'announcement', $id, $sectorId, $actor, []);
+        });
+    }
+
+    /** @param callable(PDO): void $operation */
+    private function transaction(callable $operation): void
+    {
+        try {
+            $connection = $this->connectionFactory->connection();
+            $connection->beginTransaction();
+            $operation($connection);
+            $connection->commit();
+        } catch (AdminOperationFailed $exception) {
+            if (isset($connection) && $connection->inTransaction()) {
+                $connection->rollBack();
+            }
+
+            throw $exception;
+        } catch (DashboardConnectionUnavailable|PDOException $exception) {
+            if (isset($connection) && $connection->inTransaction()) {
+                $connection->rollBack();
+            }
+
+            throw new AdminDataUnavailable('The administrative database is unavailable.', 0, $exception);
+        } catch (Throwable $exception) {
+            if (isset($connection) && $connection->inTransaction()) {
+                $connection->rollBack();
+            }
+
+            throw new AdminOperationFailed('The administrative operation could not be completed.', 0, $exception);
+        }
+    }
+
+    /** @return array{id:int,key:string} */
+    private function sector(PDO $connection, string $key): array
+    {
+        $statement = $connection->prepare('SELECT SectorId, SectorKey FROM dbo.MonitorDePremios_Setores WHERE SectorKey = ? AND IsActive = 1');
+        $statement->execute([$key]);
+        $row = $statement->fetch();
+
+        if (! is_array($row)) {
+            throw new AdminOperationFailed('The selected sector is unavailable.');
+        }
+
+        $row = array_change_key_case($row, CASE_LOWER);
+
+        return ['id' => (int) $row['sectorid'], 'key' => (string) $row['sectorkey']];
+    }
+
+    /** @param array<string, mixed> $metadata */
+    private function audit(PDO $connection, string $action, string $entityType, int $entityId, ?int $sectorId, AdminUser $actor, array $metadata): void
+    {
+        $statement = $connection->prepare(<<<'SQL'
+            INSERT INTO dbo.MonitorDePremios_Auditoria
+                (ActionName, EntityType, EntityId, SectorId, ActorLabel, MetadataJson)
+            VALUES (?, ?, ?, ?, ?, ?)
+            SQL);
+        $statement->execute([
+            $action,
+            $entityType,
+            $entityId,
+            $sectorId,
+            $actor->displayName,
+            json_encode($metadata, JSON_THROW_ON_ERROR),
+        ]);
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function rows(false|\PDOStatement $statement): array
+    {
+        if ($statement === false) {
+            throw new AdminDataUnavailable('The administrative information could not be read.');
+        }
+
+        $rows = $statement->fetchAll();
+
+        return array_map(
+            static fn (array $row): array => array_change_key_case($row, CASE_LOWER),
+            is_array($rows) ? $rows : [],
+        );
+    }
+}

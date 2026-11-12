@@ -1,0 +1,461 @@
+<?php
+
+namespace App\Infrastructure\SqlServer;
+
+use App\Domain\Admin\AdminManagementRepository;
+use App\Domain\Admin\AdminUser;
+use App\Domain\Admin\Exceptions\AdminDataUnavailable;
+use App\Domain\Admin\Exceptions\AdminOperationFailed;
+use App\Domain\Announcements\AnnouncementAttachment;
+use App\Domain\Announcements\AnnouncementFile;
+use App\Infrastructure\SqlServer\Exceptions\DashboardConnectionUnavailable;
+use PDO;
+use PDOException;
+use Throwable;
+
+final readonly class SqlServerAdminManagementRepository implements AdminManagementRepository
+{
+    public function __construct(private DashboardOdbcConnectionFactory $connectionFactory) {}
+
+    public function dashboard(): array
+    {
+        try {
+            $connection = $this->connectionFactory->connection();
+
+            return [
+                'rules' => $this->rows($connection->query(<<<'SQL'
+                    SELECT prize_rule.PrizeRuleId, sector.SectorKey, prize_rule.RuleVersion, prize_rule.MinimumSquares,
+                           prize_rule.PrizePoolCents, prize_rule.Currency, prize_rule.IsActive, prize_rule.CreatedAt
+                    FROM dbo.MonitorDePremios_Regras_Premio AS prize_rule
+                    INNER JOIN dbo.MonitorDePremios_Setores AS sector ON sector.SectorId = prize_rule.SectorId
+                    ORDER BY sector.SectorKey, prize_rule.IsActive DESC, prize_rule.MinimumSquares
+                    SQL)),
+                'announcements' => $this->rows($connection->query(<<<'SQL'
+                    SELECT announcement.AnnouncementId, announcement.AnnouncementScope, sector.SectorKey,
+                           announcement.Title, announcement.Body, announcement.StartsAt, announcement.EndsAt,
+                           announcement.IsActive, announcement.UpdatedAt,
+                           attachment.AttachmentId, attachment.OriginalName AS AttachmentOriginalName,
+                           attachment.MimeType AS AttachmentMimeType, attachment.Sha256 AS AttachmentSha256
+                    FROM dbo.MonitorDePremios_Comunicados AS announcement
+                    LEFT JOIN dbo.MonitorDePremios_Setores AS sector ON sector.SectorId = announcement.SectorId
+                    LEFT JOIN dbo.MonitorDePremios_Comunicados_Anexos AS attachment ON attachment.AnnouncementId = announcement.AnnouncementId
+                    ORDER BY announcement.IsActive DESC, announcement.StartsAt DESC, announcement.AnnouncementId DESC
+                    SQL)),
+                'audit' => $this->rows($connection->query(<<<'SQL'
+                    SELECT TOP (30) OccurredAt, ActionName, EntityType, EntityId, ActorLabel, MetadataJson
+                    FROM dbo.MonitorDePremios_Auditoria
+                    ORDER BY AuditId DESC
+                    SQL)),
+            ];
+        } catch (DashboardConnectionUnavailable|PDOException $exception) {
+            throw new AdminDataUnavailable('The administrative database is unavailable.', 0, $exception);
+        } catch (Throwable $exception) {
+            throw new AdminDataUnavailable('The administrative information could not be read.', 0, $exception);
+        }
+    }
+
+    public function createPrizeRule(string $sectorKey, int $minimumSquares, int $prizePoolCents, AdminUser $actor): void
+    {
+        $this->transaction(function (PDO $connection) use ($sectorKey, $minimumSquares, $prizePoolCents, $actor): void {
+            $sector = $this->sector($connection, $sectorKey);
+            $statement = $connection->prepare(<<<'SQL'
+                INSERT INTO dbo.MonitorDePremios_Regras_Premio
+                    (SectorId, RuleVersion, MinimumSquares, PrizePoolCents, Currency, IsActive)
+                VALUES (?, 'premio-producao-v1', ?, ?, 'EUR', 1)
+                SQL);
+            $statement->execute([$sector['id'], $minimumSquares, $prizePoolCents]);
+            $id = (int) $connection->query('SELECT CAST(SCOPE_IDENTITY() AS BIGINT)')->fetchColumn();
+            $this->audit($connection, 'prize_rule.created', 'prize_rule', $id, (int) $sector['id'], $actor, [
+                'minimum_squares' => $minimumSquares,
+                'prize_pool_cents' => $prizePoolCents,
+            ]);
+        });
+    }
+
+    public function updatePrizeRule(int $id, int $minimumSquares, int $prizePoolCents, AdminUser $actor): void
+    {
+        $this->transaction(function (PDO $connection) use ($id, $minimumSquares, $prizePoolCents, $actor): void {
+            $statement = $connection->prepare(<<<'SQL'
+                UPDATE prize_rule
+                SET MinimumSquares = ?, PrizePoolCents = ?
+                OUTPUT inserted.SectorId
+                FROM dbo.MonitorDePremios_Regras_Premio AS prize_rule
+                WHERE prize_rule.PrizeRuleId = ? AND prize_rule.IsActive = 1
+                SQL);
+            $statement->execute([$minimumSquares, $prizePoolCents, $id]);
+            $sectorIds = $statement->fetchAll(PDO::FETCH_COLUMN);
+
+            if (! is_array($sectorIds) || count($sectorIds) !== 1) {
+                throw new AdminOperationFailed('The prize rule was not active.');
+            }
+
+            $this->audit($connection, 'prize_rule.updated', 'prize_rule', $id, (int) $sectorIds[0], $actor, [
+                'minimum_squares' => $minimumSquares,
+                'prize_pool_cents' => $prizePoolCents,
+            ]);
+        });
+    }
+
+    public function deactivatePrizeRule(int $id, AdminUser $actor): void
+    {
+        $this->transaction(function (PDO $connection) use ($id, $actor): void {
+            $statement = $connection->prepare(<<<'SQL'
+                UPDATE prize_rule
+                SET IsActive = 0
+                OUTPUT inserted.SectorId
+                FROM dbo.MonitorDePremios_Regras_Premio AS prize_rule
+                WHERE prize_rule.PrizeRuleId = ? AND prize_rule.IsActive = 1
+                SQL);
+            $statement->execute([$id]);
+            $sectorId = $statement->fetchColumn();
+
+            if ($sectorId === false) {
+                throw new AdminOperationFailed('The prize rule was not active.');
+            }
+
+            $this->audit($connection, 'prize_rule.deactivated', 'prize_rule', $id, (int) $sectorId, $actor, []);
+        });
+    }
+
+    public function deletePrizeRule(int $id, AdminUser $actor): void
+    {
+        $this->transaction(function (PDO $connection) use ($id, $actor): void {
+            $statement = $connection->prepare(<<<'SQL'
+                DELETE FROM prize_rule
+                OUTPUT deleted.SectorId
+                FROM dbo.MonitorDePremios_Regras_Premio AS prize_rule
+                WHERE prize_rule.PrizeRuleId = ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM dbo.MonitorDePremios_Premios_Mensais AS monthly_prize
+                      WHERE monthly_prize.AppliedPrizeRuleId = prize_rule.PrizeRuleId
+                  )
+                SQL);
+            $statement->execute([$id]);
+            $sectorIds = $statement->fetchAll(PDO::FETCH_COLUMN);
+
+            if (! is_array($sectorIds) || count($sectorIds) !== 1) {
+                throw new AdminOperationFailed('The prize rule could not be deleted.');
+            }
+
+            $this->audit($connection, 'prize_rule.deleted', 'prize_rule', $id, (int) $sectorIds[0], $actor, []);
+        });
+    }
+
+    public function createAnnouncement(string $scope, string $title, string $body, string $startsAt, ?string $endsAt, AdminUser $actor, ?AnnouncementFile $attachment = null): void
+    {
+        if (trim($body) === '' && $attachment === null) {
+            throw new AdminOperationFailed('An announcement must have a body or an attachment.');
+        }
+
+        $this->transaction(function (PDO $connection) use ($scope, $title, $body, $startsAt, $endsAt, $actor, $attachment): void {
+            $sectorId = $scope === 'global' ? null : (int) $this->sector($connection, $scope)['id'];
+            $statement = $connection->prepare(<<<'SQL'
+                INSERT INTO dbo.MonitorDePremios_Comunicados
+                    (AnnouncementScope, SectorId, Title, Body, StartsAt, EndsAt, IsActive)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                SQL);
+            $statement->execute([$scope, $sectorId, $title, $body, $startsAt, $endsAt]);
+            $identity = $connection->query('SELECT CAST(SCOPE_IDENTITY() AS BIGINT)');
+            $id = (int) $identity->fetchColumn();
+            $identity->closeCursor();
+
+            if ($attachment !== null) {
+                $this->insertAttachment($connection, $id, $attachment);
+            }
+
+            $this->audit($connection, 'announcement.created', 'announcement', $id, $sectorId, $actor, [
+                'scope' => $scope,
+                'starts_at' => $startsAt,
+                'ends_at' => $endsAt,
+                'attachment' => $attachment === null ? null : $this->attachmentMetadata($attachment),
+            ]);
+        });
+    }
+
+    public function deactivateAnnouncement(int $id, AdminUser $actor): void
+    {
+        $this->transaction(function (PDO $connection) use ($id, $actor): void {
+            $statement = $connection->prepare(<<<'SQL'
+                UPDATE announcement
+                SET IsActive = 0, UpdatedAt = SYSUTCDATETIME()
+                OUTPUT inserted.SectorId
+                FROM dbo.MonitorDePremios_Comunicados AS announcement
+                WHERE announcement.AnnouncementId = ? AND announcement.IsActive = 1
+                SQL);
+            $statement->execute([$id]);
+            $sectorId = $statement->fetchColumn();
+
+            if ($sectorId === false) {
+                throw new AdminOperationFailed('The announcement was not active.');
+            }
+
+            $this->audit($connection, 'announcement.deactivated', 'announcement', $id, $sectorId === null ? null : (int) $sectorId, $actor, []);
+        });
+    }
+
+    public function updateAnnouncement(int $id, string $scope, string $title, string $body, string $startsAt, ?string $endsAt, AdminUser $actor, ?AnnouncementFile $newAttachment = null, bool $removeAttachment = false): ?string
+    {
+        return $this->transaction(function (PDO $connection) use ($id, $scope, $title, $body, $startsAt, $endsAt, $actor, $newAttachment, $removeAttachment): ?string {
+            $sectorId = $scope === 'global' ? null : (int) $this->sector($connection, $scope)['id'];
+            $statement = $connection->prepare(<<<'SQL'
+                UPDATE announcement
+                SET AnnouncementScope = ?, SectorId = ?, Title = ?, Body = ?, StartsAt = ?, EndsAt = ?, UpdatedAt = SYSUTCDATETIME()
+                OUTPUT inserted.SectorId
+                FROM dbo.MonitorDePremios_Comunicados AS announcement
+                WHERE announcement.AnnouncementId = ? AND announcement.IsActive = 1
+                SQL);
+            $statement->execute([$scope, $sectorId, $title, $body, $startsAt, $endsAt, $id]);
+            $sectorIds = $statement->fetchAll(PDO::FETCH_COLUMN);
+
+            if (! is_array($sectorIds) || count($sectorIds) !== 1) {
+                throw new AdminOperationFailed('The announcement was not active.');
+            }
+
+            $savedSectorId = $sectorIds[0] === null ? null : (int) $sectorIds[0];
+            $unlinkedName = null;
+
+            if ($newAttachment !== null || $removeAttachment) {
+                $unlinkedName = $this->deleteAttachment($connection, $id);
+            }
+
+            if ($newAttachment !== null) {
+                $this->insertAttachment($connection, $id, $newAttachment);
+            }
+
+            if (trim($body) === '' && ! $this->hasAttachment($connection, $id)) {
+                throw new AdminOperationFailed('An announcement must have a body or an attachment.');
+            }
+
+            $this->audit($connection, 'announcement.updated', 'announcement', $id, $savedSectorId, $actor, [
+                'scope' => $scope,
+                'starts_at' => $startsAt,
+                'ends_at' => $endsAt,
+                'attachment' => $newAttachment === null ? null : $this->attachmentMetadata($newAttachment),
+                'attachment_unlinked' => $unlinkedName,
+            ]);
+
+            return $unlinkedName;
+        });
+    }
+
+    public function deleteAnnouncement(int $id, AdminUser $actor): ?string
+    {
+        return $this->transaction(function (PDO $connection) use ($id, $actor): ?string {
+            $unlinkedName = $this->deleteAttachment($connection, $id);
+            $statement = $connection->prepare(<<<'SQL'
+                DELETE FROM announcement
+                OUTPUT deleted.SectorId
+                FROM dbo.MonitorDePremios_Comunicados AS announcement
+                WHERE announcement.AnnouncementId = ?
+                SQL);
+            $statement->execute([$id]);
+            $sectorIds = $statement->fetchAll(PDO::FETCH_COLUMN);
+
+            if (! is_array($sectorIds) || count($sectorIds) !== 1) {
+                throw new AdminOperationFailed('The announcement could not be deleted.');
+            }
+
+            $sectorId = $sectorIds[0] === null ? null : (int) $sectorIds[0];
+            $this->audit($connection, 'announcement.deleted', 'announcement', $id, $sectorId, $actor, [
+                'attachment_unlinked' => $unlinkedName,
+            ]);
+
+            return $unlinkedName;
+        });
+    }
+
+    public function announcementAttachmentNames(): array
+    {
+        try {
+            $statement = $this->connectionFactory->connection()->query(
+                'SELECT StoredName FROM dbo.MonitorDePremios_Comunicados_Anexos',
+            );
+
+            if ($statement === false) {
+                throw new AdminDataUnavailable('The announcement attachments could not be read.');
+            }
+
+            return array_values(array_map('strval', $statement->fetchAll(PDO::FETCH_COLUMN)));
+        } catch (AdminDataUnavailable $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            throw new AdminDataUnavailable('The announcement attachments could not be read.', 0, $exception);
+        }
+    }
+
+    public function announcementAttachment(int $announcementId): ?AnnouncementAttachment
+    {
+        try {
+            $statement = $this->connectionFactory->connection()->prepare(<<<'SQL'
+                SELECT AttachmentId, StoredName, OriginalName, MimeType, SizeBytes, Sha256, Width, Height
+                FROM dbo.MonitorDePremios_Comunicados_Anexos
+                WHERE AnnouncementId = ?
+                SQL);
+            $statement->execute([$announcementId]);
+            $row = $statement->fetch();
+            $statement->closeCursor();
+
+            if (! is_array($row)) {
+                return null;
+            }
+
+            $row = array_change_key_case($row, CASE_LOWER);
+
+            return new AnnouncementAttachment(
+                id: (int) $row['attachmentid'],
+                storedName: (string) $row['storedname'],
+                originalName: (string) $row['originalname'],
+                mimeType: (string) $row['mimetype'],
+                sizeBytes: (int) $row['sizebytes'],
+                sha256: (string) $row['sha256'],
+                width: isset($row['width']) ? (int) $row['width'] : null,
+                height: isset($row['height']) ? (int) $row['height'] : null,
+            );
+        } catch (Throwable $exception) {
+            throw new AdminDataUnavailable('The announcement attachment could not be read.', 0, $exception);
+        }
+    }
+
+    private function insertAttachment(PDO $connection, int $announcementId, AnnouncementFile $attachment): void
+    {
+        $statement = $connection->prepare(<<<'SQL'
+            INSERT INTO dbo.MonitorDePremios_Comunicados_Anexos
+                (AnnouncementId, StoredName, OriginalName, MimeType, SizeBytes, Sha256, Width, Height)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            SQL);
+        $statement->execute([
+            $announcementId,
+            $attachment->storedName,
+            $attachment->originalName,
+            $attachment->mimeType,
+            $attachment->sizeBytes,
+            $attachment->sha256,
+            $attachment->width,
+            $attachment->height,
+        ]);
+    }
+
+    /** @return string|null Stored name of the removed attachment row. */
+    private function deleteAttachment(PDO $connection, int $announcementId): ?string
+    {
+        $statement = $connection->prepare(<<<'SQL'
+            DELETE FROM dbo.MonitorDePremios_Comunicados_Anexos
+            OUTPUT deleted.StoredName
+            WHERE AnnouncementId = ?
+            SQL);
+        $statement->execute([$announcementId]);
+        $names = $statement->fetchAll(PDO::FETCH_COLUMN);
+        $statement->closeCursor();
+        $name = is_array($names) ? ($names[0] ?? null) : null;
+
+        return is_string($name) && $name !== '' ? $name : null;
+    }
+
+    private function hasAttachment(PDO $connection, int $announcementId): bool
+    {
+        $statement = $connection->prepare('SELECT COUNT(*) FROM dbo.MonitorDePremios_Comunicados_Anexos WHERE AnnouncementId = ?');
+        $statement->execute([$announcementId]);
+        $count = (int) $statement->fetchColumn();
+        $statement->closeCursor();
+
+        return $count > 0;
+    }
+
+    /** @return array{stored_name:string,original_name:string,mime_type:string,size_bytes:int,sha256:string} */
+    private function attachmentMetadata(AnnouncementFile $attachment): array
+    {
+        return [
+            'stored_name' => $attachment->storedName,
+            'original_name' => $attachment->originalName,
+            'mime_type' => $attachment->mimeType,
+            'size_bytes' => $attachment->sizeBytes,
+            'sha256' => $attachment->sha256,
+        ];
+    }
+
+    /**
+     * @template T
+     *
+     * @param  callable(PDO): T  $operation
+     * @return T
+     */
+    private function transaction(callable $operation): mixed
+    {
+        try {
+            $connection = $this->connectionFactory->connection();
+            $connection->beginTransaction();
+            $result = $operation($connection);
+            $connection->commit();
+
+            return $result;
+        } catch (AdminOperationFailed $exception) {
+            if (isset($connection) && $connection->inTransaction()) {
+                $connection->rollBack();
+            }
+
+            throw $exception;
+        } catch (DashboardConnectionUnavailable|PDOException $exception) {
+            if (isset($connection) && $connection->inTransaction()) {
+                $connection->rollBack();
+            }
+
+            throw new AdminDataUnavailable('The administrative database is unavailable.', 0, $exception);
+        } catch (Throwable $exception) {
+            if (isset($connection) && $connection->inTransaction()) {
+                $connection->rollBack();
+            }
+
+            throw new AdminOperationFailed('The administrative operation could not be completed.', 0, $exception);
+        }
+    }
+
+    /** @return array{id:int,key:string} */
+    private function sector(PDO $connection, string $key): array
+    {
+        $statement = $connection->prepare('SELECT SectorId, SectorKey FROM dbo.MonitorDePremios_Setores WHERE SectorKey = ? AND IsActive = 1');
+        $statement->execute([$key]);
+        $row = $statement->fetch();
+
+        if (! is_array($row)) {
+            throw new AdminOperationFailed('The selected sector is unavailable.');
+        }
+
+        $row = array_change_key_case($row, CASE_LOWER);
+
+        return ['id' => (int) $row['sectorid'], 'key' => (string) $row['sectorkey']];
+    }
+
+    /** @param array<string, mixed> $metadata */
+    private function audit(PDO $connection, string $action, string $entityType, int $entityId, ?int $sectorId, AdminUser $actor, array $metadata): void
+    {
+        $statement = $connection->prepare(<<<'SQL'
+            INSERT INTO dbo.MonitorDePremios_Auditoria
+                (ActionName, EntityType, EntityId, SectorId, ActorLabel, MetadataJson)
+            VALUES (?, ?, ?, ?, ?, ?)
+            SQL);
+        $statement->execute([
+            $action,
+            $entityType,
+            $entityId,
+            $sectorId,
+            $actor->displayName,
+            json_encode($metadata, JSON_THROW_ON_ERROR),
+        ]);
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function rows(false|\PDOStatement $statement): array
+    {
+        if ($statement === false) {
+            throw new AdminDataUnavailable('The administrative information could not be read.');
+        }
+
+        $rows = $statement->fetchAll();
+
+        return array_map(
+            static fn (array $row): array => array_change_key_case($row, CASE_LOWER),
+            is_array($rows) ? $rows : [],
+        );
+    }
+}

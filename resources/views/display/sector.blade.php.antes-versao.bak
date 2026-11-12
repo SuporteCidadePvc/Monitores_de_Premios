@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>{{ $screens[$screen]['label'] }} — {{ $sector->name }}</title>
+    <link rel="icon" type="image/png" href="{{ asset('assets/images/favicon-01.png') }}">
+    <link rel="stylesheet" href="{{ asset('assets/css/display.css') }}">
+</head>
+<body
+    data-sector="{{ $sector->key }}"
+    data-screen="{{ $screen }}"
+    data-kiosk-ready="true"
+    @if ($screen === 'comunicado' && $announcement?->attachment?->isImage()) data-announcement-media="image" @endif
+    style="--sector-accent: {{ $sector->accentColor }}"
+>
+    <main
+        class="display-shell"
+        data-playlist
+        data-server-epoch-milliseconds="{{ $serverEpochMilliseconds }}"
+        data-playlist-steps="{{ json_encode($playlist, JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT | JSON_HEX_TAG) }}"
+    >
+        <header @class(['display-header', 'display-header--announcement' => $screen === 'comunicado'])>
+            <span class="display-header-spacer" aria-hidden="true"></span>
+
+            <img class="company-logo" src="{{ asset('assets/images/Logotipo.png') }}" alt="Cidade PVC — Centro Nacional de Fabricação de Caixilharia">
+            <span class="visually-hidden">Setor {{ $sector->name }}</span>
+
+            <div class="display-settings-menu">
+                <a class="settings-link" href="{{ route('admin.dashboard') }}" aria-label="Abrir administração">
+                    <img class="settings-icon" src="{{ asset('assets/images/settings.svg') }}" alt="" aria-hidden="true">
+                </a>
+
+                <nav class="display-controls" data-display-controls aria-label="Controlos do monitor">
+                    <div class="display-controls__screens" role="group" aria-label="Escolher tela">
+                        <a
+                            class="display-control"
+                            data-playlist-screen-selector
+                            data-playlist-screen="principal"
+                            href="{{ route('display.home', ['sector' => $sector->key]) }}"
+                            @if ($screen === 'principal') aria-current="page" @endif
+                        >
+                            <span class="display-control__dot" aria-hidden="true"></span>
+                            Prémios
+                        </a>
+                        <a
+                            class="display-control"
+                            data-playlist-screen-selector
+                            data-playlist-screen="hoje"
+                            href="{{ route('display.screen', ['sector' => $sector->key, 'screen' => 'hoje']) }}"
+                            @if ($screen === 'hoje') aria-current="page" @endif
+                        >
+                            <span class="display-control__dot" aria-hidden="true"></span>
+                            Hoje
+                        </a>
+                        <a
+                            class="display-control"
+                            data-playlist-screen-selector
+                            data-playlist-screen="semana"
+                            href="{{ route('display.screen', ['sector' => $sector->key, 'screen' => 'semana']) }}"
+                            @if ($screen === 'semana') aria-current="page" @endif
+                        >
+                            <span class="display-control__dot" aria-hidden="true"></span>
+                            Semana
+                        </a>
+                        <a
+                            class="display-control"
+                            data-playlist-screen-selector
+                            data-playlist-screen="mes"
+                            href="{{ route('display.screen', ['sector' => $sector->key, 'screen' => 'mes']) }}"
+                            @if ($screen === 'mes') aria-current="page" @endif
+                        >
+                            <span class="display-control__dot" aria-hidden="true"></span>
+                            Mês
+                        </a>
+                    </div>
+
+                    <span class="display-controls__separator" aria-hidden="true"></span>
+
+                    <div class="playlist-timing" data-playlist-timing data-state="active">
+                        <span class="playlist-timing__track" aria-hidden="true">
+                            <span class="playlist-timing__progress" data-playlist-progress></span>
+                        </span>
+                        <span class="playlist-timing__next" data-playlist-next-label>Próxima tela…</span>
+                        <span class="playlist-timing__label" data-playlist-countdown>A preparar a playlist…</span>
+                    </div>
+
+                    <button class="display-control display-control--pause" type="button" data-playlist-toggle aria-label="Pausar playlist" aria-pressed="false">
+                        <span aria-hidden="true">▮▮</span>
+                        <span data-playlist-toggle-label>Pausar</span>
+                    </button>
+                </nav>
+            </div>
+        </header>
+
+        @if ($sector->usesProvisionalProductionData)
+            <p class="provisional-notice" role="status" data-provisional-notice>
+                {{ $sector->provisionalNotice }}
+            </p>
+        @endif
+
+        @if ($snapshotIsStale)
+            <p class="production-stale-notice" role="status" data-production-stale>
+                Dados de produção desatualizados desde {{ $snapshot->retrievedAt->format('d/m/Y H:i') }}. A ligação à fonte de produção está a ser recuperada.
+            </p>
+        @endif
+
+        @if ($screen === 'principal' && $snapshot && $snapshot->hasData)
+            <section class="dashboard-grid" aria-label="Painel de prémios de {{ $sector->name }}">
+                <article class="dashboard-card dashboard-card--prizes" aria-labelledby="prize-table-title">
+                    <h1 id="prize-table-title">Tabela de Prémios</h1>
+
+                    @if ($prizeTiers !== [])
+                        <div class="prize-table-wrap">
+                            <table class="prize-table">
+                                <thead>
+                                    <tr>
+                                        <th>Objectivo</th>
+                                        <th>Quadros</th>
+                                        <th>Valor</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach ($prizeTiers as $index => $tier)
+                                        @php
+                                            $tierNumber = $index + 1;
+                                        @endphp
+                                        <tr @class(['is-current-tier' => $prizePool && $prizePool->minimumSquares === $tier->minimumSquares])>
+                                            <td>{{ $tierNumber }}º</td>
+                                            <td>&gt; {{ number_format($tier->minimumSquares, 0, ',', '.') }}</td>
+                                            <td>{{ number_format($tier->poolCents / 100, 2, ',', ' ') }} €</td>
+                                        </tr>
+                                    @endforeach
+                                </tbody>
+                            </table>
+                        </div>
+                    @else
+                        <p class="dashboard-empty">Ainda não existem escalões de prémio ativos.</p>
+                    @endif
+                </article>
+
+                <article class="dashboard-card dashboard-card--history" aria-labelledby="prize-history-title">
+                    <h2 id="prize-history-title">6 Últimos Registos de Prémios</h2>
+
+                    <table class="prize-history-table" data-prize-history-unavailable="true">
+                        <caption>Histórico de prémios</caption>
+                        <thead>
+                            <tr>
+                                <th>Ano</th>
+                                <th>Mês</th>
+                                <th>Prémio Médio (€)</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </article>
+
+                <article class="dashboard-card dashboard-card--squares" aria-labelledby="squares-title">
+                    <h2 id="squares-title">QUADROS</h2>
+                    <strong data-production-squares>{{ number_format($snapshot->squares, 0, ',', '.') }}</strong>
+                    <span class="dashboard-sector-label">{{ $sector->name }}</span>
+                    <span class="visually-hidden">Caixilhos: <span data-production-frames>{{ number_format($snapshot->frames, 0, ',', '.') }}</span></span>
+                </article>
+
+                <article class="dashboard-card dashboard-card--calculation" aria-labelledby="calculation-title">
+                    <h2 id="calculation-title">Exemplo de cálculo:</h2>
+
+                    @if ($prizePool)
+                        <p>
+                            Prémio global atual:
+                            <strong data-prize-pool>
+                                {{ number_format($prizePool->poolCents / 100, 2, ',', ' ') }} €
+                                <span class="visually-hidden">{{ number_format($prizePool->poolCents / 100, 0, ',', '.') }} €</span>
+                            </strong>
+                        </p>
+                        <p>O valor individual é calculado proporcionalmente às horas trabalhadas no mês.</p>
+                        <p class="calculation-formula">Prémio individual = prémio global ÷ horas totais × horas individuais</p>
+                        <small data-prize-rule-version>Regra {{ $prizePool->ruleVersion }}</small>
+                    @else
+                        <p>O prémio individual é calculado proporcionalmente às horas trabalhadas no mês.</p>
+                    @endif
+                </article>
+            </section>
+
+            <footer class="display-footer">
+                <p>* Os prémios são calculados com base no número de horas trabalhadas no mês. Será informado do seu valor no dia 10 do mês seguinte.</p>
+                <p class="last-update">
+                    @if ($snapshot->isCached)
+                        <span data-production-cached>Último valor válido, obtido em {{ $snapshot->retrievedAt->format('d/m/Y H:i:s') }}</span>
+                    @else
+                        Atualizado em {{ $snapshot->retrievedAt->format('d/m/Y H:i:s') }}
+                    @endif
+                </p>
+            </footer>
+        @elseif (in_array($screen, ['hoje', 'semana', 'mes'], true) && $snapshot && ($snapshot->hasData || $sector->key === 'aluminio'))
+            <section class="daily-display" aria-labelledby="daily-title">
+                <h1 id="daily-title">{{ match ($screen) {
+                    'hoje' => 'HOJE',
+                    'semana' => 'ESTA SEMANA',
+                    default => 'ESTE MÊS',
+                } }}</h1>
+
+                <div class="daily-metrics">
+                    <article class="daily-metric-card" aria-labelledby="daily-squares-title">
+                        <h2 id="daily-squares-title">QUADROS</h2>
+                        <strong data-production-squares>{{ number_format($snapshot->squares, 0, ',', '.') }}</strong>
+                    </article>
+
+                    <article class="daily-metric-card" aria-labelledby="daily-frames-title">
+                        <h2 id="daily-frames-title">JANELAS</h2>
+                        <strong data-production-frames>{{ number_format($snapshot->frames, 0, ',', '.') }}</strong>
+                    </article>
+                </div>
+
+                @if ($snapshot->isCached)
+                    <p class="visually-hidden">
+                        <span data-production-cached>Último valor válido, obtido em {{ $snapshot->retrievedAt->format('d/m/Y H:i:s') }}</span>
+                    </p>
+                @endif
+            </section>
+        @elseif ($screen === 'comunicado' && $announcement?->attachment?->isImage())
+            {{-- The image is the announcement; title and message only appear if the image cannot load. --}}
+            <section class="announcement-display announcement-display--image" aria-labelledby="screen-title" data-announcement-image-section>
+                <h1 id="screen-title" class="visually-hidden" data-announcement-title>{{ $announcement->title }}</h1>
+                <img
+                    class="announcement-image"
+                    src="{{ route('announcements.attachment.display', $announcement->id) }}?v={{ substr($announcement->attachment->sha256, 0, 12) }}"
+                    alt="{{ $announcement->title }}"
+                    @if ($announcement->attachment->width && $announcement->attachment->height)
+                        width="{{ $announcement->attachment->width }}"
+                        height="{{ $announcement->attachment->height }}"
+                    @endif
+                    decoding="async"
+                    data-announcement-image
+                    onerror="this.closest('[data-announcement-image-section]').classList.add('is-image-unavailable')"
+                >
+                <div class="announcement-image-fallback" data-announcement-image-fallback>
+                    <p class="announcement-image-fallback__title">{{ $announcement->title }}</p>
+                    @if (trim($announcement->body) !== '')
+                        <div class="announcement-body">{!! nl2br(e($announcement->body)) !!}</div>
+                    @endif
+                </div>
+            </section>
+        @elseif ($screen === 'comunicado')
+            <section class="announcement-display" aria-labelledby="screen-title">
+                @if ($announcement)
+                    <h1 id="screen-title" data-announcement-title>{{ $announcement->title }}</h1>
+                    <div class="announcement-body" data-announcement-body>{!! nl2br(e($announcement->body)) !!}</div>
+                @elseif ($announcementDataUnavailable)
+                    <h1 id="screen-title">Comunicados temporariamente indisponíveis</h1>
+                    <p data-announcement-unavailable>
+                        Não foi possível consultar os comunicados agora. O painel tentará novamente no próximo ciclo.
+                    </p>
+                @else
+                    <h1 id="screen-title">Sem comunicado ativo</h1>
+                    <p data-announcement-empty>
+                        Não existe comunicado ativo para este setor neste momento.
+                    </p>
+                @endif
+            </section>
+        @else
+            <section class="display-card" aria-labelledby="screen-title">
+                <p class="eyebrow">{{ $screens[$screen]['label'] }}</p>
+
+                @if ($snapshot && ! $snapshot->hasData)
+                    <h1 id="screen-title">Ainda sem registos de produção</h1>
+                    <p data-production-empty>
+                        Não há registos para este período. O painel voltará a consultar a produção no próximo ciclo.
+                    </p>
+                    <p class="last-update">Consulta efetuada em {{ $snapshot->retrievedAt->format('d/m/Y H:i:s') }}</p>
+                @elseif ($snapshot)
+                    <h1 id="screen-title">Produção — {{ $sector->name }}</h1>
+
+                    <div class="metric-grid">
+                        <article class="metric-card">
+                            <span>Quadros</span>
+                            <strong data-production-squares>{{ number_format($snapshot->squares, 0, ',', '.') }}</strong>
+                        </article>
+
+                        <article class="metric-card">
+                            <span>Caixilhos</span>
+                            <strong data-production-frames>{{ number_format($snapshot->frames, 0, ',', '.') }}</strong>
+                        </article>
+
+                        @if ($prizePool)
+                            <article class="metric-card metric-card--accent">
+                                <span>Prémio global atingido</span>
+                                <strong data-prize-pool>{{ number_format($prizePool->poolCents / 100, 0, ',', '.') }} €</strong>
+                                <small data-prize-rule-version>Regra {{ $prizePool->ruleVersion }}</small>
+                            </article>
+                        @endif
+                    </div>
+
+                    <p class="last-update">
+                        @if ($snapshot->isCached)
+                            <span data-production-cached>Último valor válido, obtido em {{ $snapshot->retrievedAt->format('d/m/Y H:i:s') }}</span>
+                        @else
+                            Atualizado em {{ $snapshot->retrievedAt->format('d/m/Y H:i:s') }}
+                        @endif
+                    </p>
+                @elseif ($productionDataUnavailable)
+                    <h1 id="screen-title">Dados temporariamente indisponíveis</h1>
+                    <p data-production-unavailable>
+                        Não foi possível consultar a produção agora. O painel tentará novamente no próximo carregamento.
+                    </p>
+                @endif
+            </section>
+        @endif
+
+        <p class="playlist-status" data-playlist-status aria-live="polite">
+            Playlist sincronizada pelo relógio do servidor.
+        </p>
+    </main>
+
+    <script src="{{ asset('assets/js/display-playlist.js') }}" defer></script>
+</body>
+</html>

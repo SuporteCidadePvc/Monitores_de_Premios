@@ -1,0 +1,57 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Domain\Admin\AdminManagementRepository;
+use App\Domain\Admin\Exceptions\AdminDataUnavailable;
+use App\Domain\Announcements\AnnouncementAttachment;
+use App\Infrastructure\Announcements\AnnouncementAttachmentStore;
+use Illuminate\Http\Request;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
+use Symfony\Component\HttpFoundation\Response;
+
+final class AnnouncementAttachmentController
+{
+    /**
+     * Administration preview: any announcement, active or not, behind the admin guard.
+     */
+    public function admin(
+        Request $request,
+        int $id,
+        AdminManagementRepository $management,
+        AnnouncementAttachmentStore $attachments,
+    ): Response {
+        try {
+            $attachment = $management->announcementAttachment($id);
+        } catch (AdminDataUnavailable) {
+            abort(503);
+        }
+
+        abort_if($attachment === null, 404);
+
+        return $this->respond($request, $attachment, $attachments, 'private, max-age=300');
+    }
+
+    private function respond(
+        Request $request,
+        AnnouncementAttachment $attachment,
+        AnnouncementAttachmentStore $attachments,
+        string $cacheControl,
+    ): Response {
+        $path = $attachments->absolutePath($attachment->storedName);
+
+        abort_if($path === null, 404);
+
+        $response = new BinaryFileResponse($path, 200, [
+            'Content-Type' => $attachment->mimeType,
+            'X-Content-Type-Options' => 'nosniff',
+        ], false, null, false, false);
+
+        $response->headers->set('Cache-Control', $cacheControl);
+        $response->setContentDisposition('inline', $attachment->storedName);
+        $response->setEtag($attachment->sha256);
+        $response->isNotModified($request);
+
+        return $response;
+    }
+}

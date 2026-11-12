@@ -1,0 +1,53 @@
+<?php
+
+namespace Tests\Unit;
+
+use App\Domain\Announcements\Announcement;
+use App\Domain\Announcements\AnnouncementScope;
+use DateTimeImmutable;
+use DateTimeZone;
+use InvalidArgumentException;
+use PHPUnit\Framework\TestCase;
+
+final class AnnouncementTest extends TestCase
+{
+    private DateTimeZone $timezone;
+
+    protected function setUp(): void
+    {
+        $this->timezone = new DateTimeZone('Europe/Lisbon');
+    }
+
+    public function test_global_announcement_has_no_sector_and_is_visible_inside_its_window(): void
+    {
+        $announcement = new Announcement(
+            id: 1,
+            scope: AnnouncementScope::Global,
+            sectorKey: null,
+            title: 'Comunicado geral',
+            body: 'Mensagem para todos.',
+            startsAt: new DateTimeImmutable('2026-08-31 10:00:00', $this->timezone),
+            endsAt: new DateTimeImmutable('2026-08-31 12:00:00', $this->timezone),
+            isActive: true,
+        );
+
+        $this->assertTrue($announcement->isVisibleAt(new DateTimeImmutable('2026-08-31 11:00:00', $this->timezone)));
+        $this->assertFalse($announcement->isVisibleAt(new DateTimeImmutable('2026-08-31 12:00:00', $this->timezone)));
+    }
+
+    public function test_scope_must_match_its_sector(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        new Announcement(
+            id: 1,
+            scope: AnnouncementScope::Pvc,
+            sectorKey: 'aluminio',
+            title: 'Inválido',
+            body: 'Não deve ser aceite.',
+            startsAt: new DateTimeImmutable('2026-08-31 10:00:00', $this->timezone),
+            endsAt: null,
+            isActive: true,
+        );
+    }
+}

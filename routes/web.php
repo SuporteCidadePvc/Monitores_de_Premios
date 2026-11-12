@@ -1,0 +1,58 @@
+<?php
+
+use App\Http\Controllers\Admin\AdminManagementController;
+use App\Http\Controllers\Admin\AuthenticatedSessionController;
+use App\Http\Controllers\Admin\MonthlyPrizeClosingController;
+use App\Http\Controllers\Admin\MonthlyPrizeHistoryController;
+use App\Http\Controllers\AnnouncementAttachmentController;
+use App\Http\Controllers\Display\SectorDisplayController;
+use App\Http\Controllers\HealthController;
+use Illuminate\Support\Facades\Route;
+
+Route::redirect('/', '/pvc');
+Route::get('/health', HealthController::class)->name('health');
+Route::get('/comunicados/{id}/anexo', [AnnouncementAttachmentController::class, 'display'])
+    ->whereNumber('id')
+    ->name('announcements.attachment.display');
+
+Route::prefix('admin')->name('admin.')->group(function (): void {
+    Route::middleware('guest:admin')->group(function (): void {
+        Route::get('/login', [AuthenticatedSessionController::class, 'create'])->name('login');
+        Route::post('/login', [AuthenticatedSessionController::class, 'store'])->name('login.store');
+    });
+
+    Route::middleware('auth:admin')->group(function (): void {
+        Route::get('/', [AdminManagementController::class, 'index'])->name('dashboard');
+        Route::get('/historico-premios', [MonthlyPrizeHistoryController::class, 'index'])->name('monthly-prize-history.index');
+        Route::get('/historico-premios/exportar', [MonthlyPrizeHistoryController::class, 'export'])->name('monthly-prize-history.export');
+        Route::get('/fecho-mensal', [MonthlyPrizeClosingController::class, 'index'])->name('monthly-prize-closing.index');
+        Route::post('/premios', [AdminManagementController::class, 'storePrizeRule'])->name('prize-rules.store');
+        Route::post('/premios/{id}/editar', [AdminManagementController::class, 'updatePrizeRule'])->whereNumber('id')->name('prize-rules.update');
+        Route::post('/premios/{id}/desativar', [AdminManagementController::class, 'deactivatePrizeRule'])->whereNumber('id')->name('prize-rules.deactivate');
+        Route::post('/premios/{id}/remover', [AdminManagementController::class, 'deletePrizeRule'])->whereNumber('id')->name('prize-rules.delete');
+        Route::post('/comunicados', [AdminManagementController::class, 'storeAnnouncement'])->name('announcements.store');
+        Route::post('/comunicados/{id}/editar', [AdminManagementController::class, 'updateAnnouncement'])->whereNumber('id')->name('announcements.update');
+        Route::post('/comunicados/{id}/desativar', [AdminManagementController::class, 'deactivateAnnouncement'])->whereNumber('id')->name('announcements.deactivate');
+        Route::post('/comunicados/{id}/remover', [AdminManagementController::class, 'deleteAnnouncement'])->whereNumber('id')->name('announcements.delete');
+        Route::get('/comunicados/{id}/anexo', [AnnouncementAttachmentController::class, 'admin'])->whereNumber('id')->name('announcements.attachment');
+        Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])->name('logout');
+    });
+});
+
+$sectorPattern = implode('|', array_keys(config('sectors.sectors')));
+$screenPattern = implode('|', array_filter(
+    array_keys(config('sectors.screens')),
+    fn (string $screen): bool => $screen !== 'principal',
+));
+
+Route::prefix('{sector}')
+    ->where(['sector' => $sectorPattern])
+    ->middleware('sector.context')
+    ->group(function () use ($screenPattern): void {
+        Route::get('/', SectorDisplayController::class)
+            ->name('display.home');
+
+        Route::get('/{screen}', SectorDisplayController::class)
+            ->where('screen', $screenPattern)
+            ->name('display.screen');
+    });

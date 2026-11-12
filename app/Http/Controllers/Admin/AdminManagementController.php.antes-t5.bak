@@ -1,0 +1,233 @@
+<?php
+
+namespace App\Http\Controllers\Admin;
+
+use App\Domain\Admin\AdminManagementRepository;
+use App\Domain\Admin\AdminUser;
+use App\Domain\Admin\Exceptions\AdminDataUnavailable;
+use App\Domain\Admin\Exceptions\AdminOperationFailed;
+use App\Infrastructure\Announcements\AnnouncementAttachmentStore;
+use DateTimeImmutable;
+use DateTimeZone;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
+use Illuminate\View\View;
+
+final class AdminManagementController
+{
+    public function index(AdminManagementRepository $management): View
+    {
+        try {
+            $dashboard = $management->dashboard();
+            $unavailable = false;
+        } catch (AdminDataUnavailable) {
+            $dashboard = ['rules' => [], 'announcements' => [], 'audit' => []];
+            $unavailable = true;
+        }
+
+        return view('admin.dashboard', $dashboard + [
+            'user' => $this->user(),
+            'unavailable' => $unavailable,
+        ]);
+    }
+
+    public function storePrizeRule(Request $request, AdminManagementRepository $management): RedirectResponse
+    {
+        $data = $this->validatedPrizeRule($request, true);
+
+        try {
+            $management->createPrizeRule(
+                (string) $data['sector'],
+                (int) $data['minimum_squares'],
+                $this->toCents((string) $data['prize_pool']),
+                $this->user(),
+            );
+        } catch (AdminDataUnavailable|AdminOperationFailed) {
+            return back()->withErrors(['rules' => 'Não foi possível guardar o escalão. Nenhuma alteração foi confirmada.'])->withInput();
+        }
+
+        return back()->with('status', 'Novo escalão de prémio criado e registado na auditoria.');
+    }
+
+    public function updatePrizeRule(Request $request, int $id, AdminManagementRepository $management): RedirectResponse
+    {
+        $data = $this->validatedPrizeRule($request, false);
+
+        try {
+            $management->updatePrizeRule(
+                $id,
+                (int) $data['minimum_squares'],
+                $this->toCents((string) $data['prize_pool']),
+                $this->user(),
+            );
+        } catch (AdminDataUnavailable|AdminOperationFailed) {
+            return back()->withErrors(['rules' => 'Não foi possível atualizar o escalão. Nenhuma alteração foi confirmada.'])->withInput();
+        }
+
+        return back()->with('status', 'Escalão de prémio atualizado e registado na auditoria.');
+    }
+
+    public function deactivatePrizeRule(Request $request, int $id, AdminManagementRepository $management): RedirectResponse
+    {
+        $request->validate(['confirm' => ['accepted']]);
+
+        try {
+            $management->deactivatePrizeRule($id, $this->user());
+        } catch (AdminDataUnavailable|AdminOperationFailed) {
+            return back()->withErrors(['rules' => 'Não foi possível desativar o escalão.'])->withInput();
+        }
+
+        return back()->with('status', 'Escalão desativado e registado na auditoria.');
+    }
+
+    public function deletePrizeRule(Request $request, int $id, AdminManagementRepository $management): RedirectResponse
+    {
+        $request->validate(['confirm_delete' => ['accepted']]);
+
+        try {
+            $management->deletePrizeRule($id, $this->user());
+        } catch (AdminDataUnavailable|AdminOperationFailed) {
+            return back()->withErrors(['rules' => 'Não foi possível remover o escalão. Escalões já usados em prémios mensais devem ser desativados para preservar o histórico.'])->withInput();
+        }
+
+        return back()->with('status', 'Escalão removido e registado na auditoria.');
+    }
+
+    public function storeAnnouncement(Request $request, AdminManagementRepository $management): RedirectResponse
+    {
+        $data = $request->validate([
+            'scope' => ['required', Rule::in(['global', 'pvc', 'aluminio'])],
+            'title' => ['required', 'string', 'max:160'],
+            'body' => ['required', 'string', 'max:8000'],
+            'starts_at' => ['required', 'date_format:Y-m-d\\TH:i'],
+            'ends_at' => ['nullable', 'date_format:Y-m-d\\TH:i', 'after:starts_at'],
+        ]);
+
+        try {
+            $management->createAnnouncement(
+                (string) $data['scope'],
+                trim((string) $data['title']),
+                trim((string) $data['body']),
+                $this->localDateTime((string) $data['starts_at']),
+                isset($data['ends_at']) && $data['ends_at'] !== null ? $this->localDateTime((string) $data['ends_at']) : null,
+                $this->user(),
+            );
+        } catch (AdminDataUnavailable|AdminOperationFailed) {
+            return back()->withErrors(['announcements' => 'Não foi possível guardar o comunicado. Nenhuma alteração foi confirmada.'])->withInput();
+        }
+
+        return back()->with('status', 'Comunicado criado e registado na auditoria.');
+    }
+
+    public function deactivateAnnouncement(Request $request, int $id, AdminManagementRepository $management): RedirectResponse
+    {
+        $request->validate(['confirm' => ['accepted']]);
+
+        try {
+            $management->deactivateAnnouncement($id, $this->user());
+        } catch (AdminDataUnavailable|AdminOperationFailed) {
+            return back()->withErrors(['announcements' => 'Não foi possível desativar o comunicado.'])->withInput();
+        }
+
+        return back()->with('status', 'Comunicado desativado e registado na auditoria.');
+    }
+
+    public function updateAnnouncement(Request $request, int $id, AdminManagementRepository $management, AnnouncementAttachmentStore $attachments): RedirectResponse
+    {
+        $data = $this->validatedAnnouncement($request);
+
+        try {
+            $unlinkedAttachment = $management->updateAnnouncement(
+                $id,
+                (string) $data['scope'],
+                trim((string) $data['title']),
+                trim((string) $data['body']),
+                $this->localDateTime((string) $data['starts_at']),
+                isset($data['ends_at']) && $data['ends_at'] !== null ? $this->localDateTime((string) $data['ends_at']) : null,
+                $this->user(),
+            );
+        } catch (AdminDataUnavailable|AdminOperationFailed) {
+            return back()->withErrors(['announcements' => 'Não foi possível atualizar o comunicado. Nenhuma alteração foi confirmada.'])->withInput();
+        }
+
+        if ($unlinkedAttachment !== null) {
+            $attachments->delete($unlinkedAttachment);
+        }
+
+        return back()->with('status', 'Comunicado atualizado e registado na auditoria.');
+    }
+
+    public function deleteAnnouncement(Request $request, int $id, AdminManagementRepository $management, AnnouncementAttachmentStore $attachments): RedirectResponse
+    {
+        $request->validate(['confirm_delete' => ['accepted']]);
+
+        try {
+            $unlinkedAttachment = $management->deleteAnnouncement($id, $this->user());
+        } catch (AdminDataUnavailable|AdminOperationFailed) {
+            return back()->withErrors(['announcements' => 'Não foi possível remover o comunicado.'])->withInput();
+        }
+
+        // The row is already committed; a file that cannot be removed is left to announcements:prune-orphans.
+        if ($unlinkedAttachment !== null) {
+            $attachments->delete($unlinkedAttachment);
+        }
+
+        return back()->with('status', 'Comunicado removido e registado na auditoria.');
+    }
+
+    private function user(): AdminUser
+    {
+        $user = auth('admin')->user();
+
+        abort_unless($user instanceof AdminUser, 403);
+
+        return $user;
+    }
+
+    private function toCents(string $value): int
+    {
+        [$euros, $decimals] = array_pad(preg_split('/[,.]/', $value) ?: [], 2, '');
+
+        return ((int) $euros * 100) + (int) str_pad($decimals, 2, '0');
+    }
+
+    /** @return array{sector?:string,minimum_squares:int,prize_pool:string} */
+    private function validatedPrizeRule(Request $request, bool $withSector): array
+    {
+        $rules = [
+            'minimum_squares' => ['required', 'integer', 'min:0', 'max:10000000'],
+            'prize_pool' => ['required', 'string', 'regex:/^\d{1,9}(?:[,.]\d{1,2})?$/'],
+        ];
+
+        if ($withSector) {
+            $rules['sector'] = ['required', Rule::in(['pvc', 'aluminio'])];
+        }
+
+        /** @var array{sector?:string,minimum_squares:int,prize_pool:string} $data */
+        $data = $request->validate($rules);
+
+        return $data;
+    }
+
+    private function localDateTime(string $value): string
+    {
+        return (new DateTimeImmutable($value, new DateTimeZone((string) config('production.timezone'))))
+            ->format('Y-m-d H:i:s');
+    }
+
+    /** @return array{scope:string,title:string,body:string,starts_at:string,ends_at?:string|null} */
+    private function validatedAnnouncement(Request $request): array
+    {
+        /** @var array{scope:string,title:string,body:string,starts_at:string,ends_at?:string|null} $data */
+        $data = $request->validate([
+            'scope' => ['required', Rule::in(['global', 'pvc', 'aluminio'])],
+            'title' => ['required', 'string', 'max:160'],
+            'body' => ['required', 'string', 'max:8000'],
+            'starts_at' => ['required', 'date_format:Y-m-d\TH:i'],
+            'ends_at' => ['nullable', 'date_format:Y-m-d\TH:i', 'after:starts_at'],
+        ]);
+
+        return $data;
+    }
+}

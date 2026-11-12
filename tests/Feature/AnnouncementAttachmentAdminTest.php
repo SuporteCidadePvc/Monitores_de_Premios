@@ -1,0 +1,212 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Domain\Admin\AdminUser;
+use App\Domain\Announcements\AnnouncementAttachment;
+use App\Infrastructure\Announcements\AnnouncementAttachmentStore;
+use Illuminate\Contracts\Filesystem\Filesystem;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Storage;
+use Tests\TestCase;
+
+final class AnnouncementAttachmentAdminTest extends TestCase
+{
+    private AdminUser $user;
+
+    private Filesystem $disk;
+
+    private AnnouncementAttachmentStore $attachments;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->user = new AdminUser(11, 'administrador', 'Administração', Hash::make('uma-password-segura'), true);
+        $this->adminUserRepository->add($this->user);
+
+        $this->disk = Storage::fake('local');
+        $this->attachments = new AnnouncementAttachmentStore($this->disk, 'announcements', 10 * 1024 * 1024);
+        $this->app->instance(AnnouncementAttachmentStore::class, $this->attachments);
+    }
+
+    public function test_an_announcement_can_be_created_with_only_an_image(): void
+    {
+        $this->actingAs($this->user, 'admin')
+            ->post(route('admin.announcements.store'), $this->announcement([
+                'body' => '',
+                'attachment' => UploadedFile::fake()->image('cartaz.png', 1920, 1080),
+            ]))
+            ->assertSessionHasNoErrors()
+            ->assertSessionHas('status');
+
+        $files = $this->disk->files('announcements');
+        $this->assertCount(1, $files);
+        $this->assertSame(
+            ['announcement:global:Cartaz de segurança:attachment:'.basename($files[0])],
+            $this->adminManagementRepository->operations,
+        );
+    }
+
+    public function test_an_announcement_needs_a_message_or_an_image(): void
+    {
+        $this->actingAs($this->user, 'admin')
+            ->post(route('admin.announcements.store'), $this->announcement(['body' => '']))
+            ->assertSessionHasErrors(['body' => 'Escreva uma mensagem ou anexe uma imagem.']);
+
+        $this->assertSame([], $this->adminManagementRepository->operations);
+    }
+
+    public function test_an_unsupported_file_is_rejected_with_a_portuguese_message_and_nothing_is_saved(): void
+    {
+        $this->actingAs($this->user, 'admin')
+            ->post(route('admin.announcements.store'), $this->announcement([
+                'attachment' => UploadedFile::fake()->createWithContent('logo.svg', '<svg xmlns="http://www.w3.org/2000/svg"/>'),
+            ]))
+            ->assertSessionHasErrors(['attachment' => 'Formato não suportado. Use uma imagem JPG, PNG ou WEBP.']);
+
+        $this->assertSame([], $this->disk->allFiles());
+        $this->assertSame([], $this->adminManagementRepository->operations);
+    }
+
+    public function test_an_oversized_image_is_rejected(): void
+    {
+        config(['announcements.attachments.max_kilobytes' => 1]);
+
+        $this->actingAs($this->user, 'admin')
+            ->post(route('admin.announcements.store'), $this->announcement([
+                'attachment' => UploadedFile::fake()->image('grande.png', 10, 10)->size(2048),
+            ]))
+            ->assertSessionHasErrors('attachment');
+
+        $this->assertSame([], $this->disk->allFiles());
+    }
+
+    public function test_a_failed_save_removes_the_uploaded_file(): void
+    {
+        $this->adminManagementRepository->failWrites = true;
+
+        $this->actingAs($this->user, 'admin')
+            ->post(route('admin.announcements.store'), $this->announcement([
+                'attachment' => UploadedFile::fake()->image('cartaz.png', 10, 10),
+            ]))
+            ->assertSessionHasErrors('announcements');
+
+        $this->assertSame([], $this->disk->allFiles());
+    }
+
+    public function test_replacing_the_image_keeps_the_new_file_and_deletes_the_old_one(): void
+    {
+        $old = $this->attachments->store(UploadedFile::fake()->image('antigo.png', 10, 10));
+        $this->adminManagementRepository->unlinkedAttachment = $old->storedName;
+
+        $this->actingAs($this->user, 'admin')
+            ->post(route('admin.announcements.update', 7), $this->announcement([
+                'body' => '',
+                'has_attachment' => '1',
+                'attachment' => UploadedFile::fake()->image('novo.png', 10, 10),
+            ]))
+            ->assertSessionHasNoErrors();
+
+        $files = $this->disk->files('announcements');
+        $this->assertCount(1, $files);
+        $this->assertNotSame('announcements/'.$old->storedName, $files[0]);
+        $this->assertStringContainsString(':attachment:'.basename($files[0]), $this->adminManagementRepository->operations[0]);
+    }
+
+    public function test_an_update_can_keep_the_current_image_without_a_message(): void
+    {
+        $this->actingAs($this->user, 'admin')
+            ->post(route('admin.announcements.update', 7), $this->announcement(['body' => '', 'has_attachment' => '1']))
+            ->assertSessionHasNoErrors();
+
+        $this->assertSame(['announcement:update:7:global:Cartaz de segurança'], $this->adminManagementRepository->operations);
+    }
+
+    public function test_removing_the_image_requires_a_message(): void
+    {
+        $this->actingAs($this->user, 'admin')
+            ->post(route('admin.announcements.update', 7), $this->announcement([
+                'body' => '',
+                'has_attachment' => '1',
+                'remove_attachment' => '1',
+            ]))
+            ->assertSessionHasErrors('body');
+
+        $this->actingAs($this->user, 'admin')
+            ->post(route('admin.announcements.update', 7), $this->announcement([
+                'body' => 'Texto que substitui a imagem.',
+                'has_attachment' => '1',
+                'remove_attachment' => '1',
+            ]))
+            ->assertSessionHasNoErrors();
+
+        $this->assertSame(
+            ['announcement:update:7:global:Cartaz de segurança:remove-attachment'],
+            $this->adminManagementRepository->operations,
+        );
+    }
+
+    public function test_dashboard_forms_accept_files_and_cards_show_the_thumbnail(): void
+    {
+        $this->adminManagementRepository->data['announcements'] = [[
+            'announcementid' => 12,
+            'announcementscope' => 'global',
+            'sectorkey' => null,
+            'title' => 'Cartaz de segurança',
+            'body' => '',
+            'startsat' => '2026-09-25 08:00:00',
+            'endsat' => null,
+            'isactive' => 1,
+            'updatedat' => '2026-09-25 08:00:00',
+            'attachmentid' => 3,
+            'attachmentoriginalname' => 'cartaz.png',
+            'attachmentmimetype' => 'image/png',
+            'attachmentsha256' => str_repeat('b', 64),
+        ]];
+
+        $this->actingAs($this->user, 'admin')
+            ->get(route('admin.dashboard'))
+            ->assertOk()
+            ->assertSee('enctype="multipart/form-data"', false)
+            ->assertSee('name="attachment"', false)
+            ->assertSee('assets/images/paperclip.svg', false)
+            ->assertSee('class="attachment-picker__button" for="announcement-attachment"', false)
+            ->assertDontSee('Escolher ficheiro')
+            ->assertSee(route('admin.announcements.attachment', 12).'?v=bbbbbbbbbbbb', false)
+            ->assertSee('Imagem: cartaz.png')
+            ->assertSee('name="remove_attachment"', false);
+    }
+
+    public function test_the_admin_preview_serves_the_image_only_to_administrators(): void
+    {
+        $file = $this->attachments->store(UploadedFile::fake()->image('cartaz.png', 10, 10));
+        $this->adminManagementRepository->attachments[12] = new AnnouncementAttachment(
+            3, $file->storedName, $file->originalName, $file->mimeType, $file->sizeBytes, $file->sha256, $file->width, $file->height,
+        );
+
+        $this->get(route('admin.announcements.attachment', 12))->assertRedirect(route('admin.login'));
+
+        $response = $this->actingAs($this->user, 'admin')->get(route('admin.announcements.attachment', 12));
+
+        $response->assertOk();
+        $this->assertSame('image/png', $response->headers->get('Content-Type'));
+        $this->assertSame('nosniff', $response->headers->get('X-Content-Type-Options'));
+        $this->assertStringContainsString('private', (string) $response->headers->get('Cache-Control'));
+        $this->assertSame('"'.$file->sha256.'"', $response->headers->get('ETag'));
+
+        $this->actingAs($this->user, 'admin')->get(route('admin.announcements.attachment', 99))->assertNotFound();
+    }
+
+    /** @param array<string, mixed> $overrides */
+    private function announcement(array $overrides = []): array
+    {
+        return $overrides + [
+            'scope' => 'global',
+            'title' => 'Cartaz de segurança',
+            'body' => 'Mensagem de apoio.',
+            'starts_at' => '2026-09-25T08:00',
+        ];
+    }
+}

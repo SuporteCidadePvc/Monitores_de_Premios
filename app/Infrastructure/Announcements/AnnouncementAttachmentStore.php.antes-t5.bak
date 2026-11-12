@@ -1,0 +1,153 @@
+<?php
+
+namespace App\Infrastructure\Announcements;
+
+use App\Domain\Announcements\AnnouncementFile;
+use App\Domain\Announcements\Exceptions\AnnouncementAttachmentRejected;
+use Illuminate\Contracts\Filesystem\Filesystem;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use Throwable;
+
+final readonly class AnnouncementAttachmentStore
+{
+    /** Extensions are derived from the detected content, never from the client file name. */
+    private const EXTENSIONS = [
+        'image/jpeg' => 'jpg',
+        'image/png' => 'png',
+        'image/webp' => 'webp',
+    ];
+
+    private const IMAGE_TYPES = [
+        IMAGETYPE_JPEG => 'image/jpeg',
+        IMAGETYPE_PNG => 'image/png',
+        IMAGETYPE_WEBP => 'image/webp',
+    ];
+
+    public function __construct(
+        private Filesystem $disk,
+        private string $directory,
+        private int $maxBytes,
+    ) {}
+
+    /**
+     * Validates the upload by its real content and writes it under a random name.
+     *
+     * @throws AnnouncementAttachmentRejected
+     */
+    public function store(UploadedFile $file): AnnouncementFile
+    {
+        if (! $file->isValid()) {
+            throw AnnouncementAttachmentRejected::uploadFailed();
+        }
+
+        $path = $file->getRealPath();
+        $size = $file->getSize();
+
+        if (! is_string($path) || $path === '' || ! is_int($size) || $size < 1) {
+            throw AnnouncementAttachmentRejected::uploadFailed();
+        }
+
+        if ($size > $this->maxBytes) {
+            throw AnnouncementAttachmentRejected::tooLarge($this->maxBytes);
+        }
+
+        $mimeType = (string) $file->getMimeType();
+
+        if (! isset(self::EXTENSIONS[$mimeType])) {
+            throw AnnouncementAttachmentRejected::unsupportedType($mimeType);
+        }
+
+        $image = @getimagesize($path);
+
+        if (! is_array($image)
+            || (self::IMAGE_TYPES[$image[2] ?? 0] ?? null) !== $mimeType
+            || ($image[0] ?? 0) < 1
+            || ($image[1] ?? 0) < 1) {
+            throw AnnouncementAttachmentRejected::notAnImage();
+        }
+
+        $sha256 = hash_file('sha256', $path);
+
+        if (! is_string($sha256)) {
+            throw AnnouncementAttachmentRejected::uploadFailed();
+        }
+
+        $storedName = Str::uuid()->toString().'.'.self::EXTENSIONS[$mimeType];
+
+        try {
+            $written = $this->disk->putFileAs($this->directory, $file, $storedName);
+        } catch (Throwable $exception) {
+            throw AnnouncementAttachmentRejected::storageFailed($exception);
+        }
+
+        if ($written === false) {
+            throw AnnouncementAttachmentRejected::storageFailed();
+        }
+
+        return new AnnouncementFile(
+            storedName: $storedName,
+            originalName: $this->originalName($file, self::EXTENSIONS[$mimeType]),
+            mimeType: $mimeType,
+            sizeBytes: $size,
+            sha256: strtolower($sha256),
+            width: (int) $image[0],
+            height: (int) $image[1],
+        );
+    }
+
+    /**
+     * Best effort: a file that cannot be removed is left for the orphan cleanup.
+     */
+    public function delete(string $storedName): void
+    {
+        if (! $this->isSafeName($storedName)) {
+            return;
+        }
+
+        try {
+            $this->disk->delete($this->directory.'/'.$storedName);
+        } catch (Throwable $exception) {
+            Log::warning('Announcement attachment could not be deleted.', [
+                'stored_name' => $storedName,
+                'exception' => $exception::class,
+            ]);
+        }
+    }
+
+    /** @return list<array{name:string,last_modified:int}> */
+    public function files(): array
+    {
+        $files = [];
+
+        foreach ($this->disk->files($this->directory) as $path) {
+            $name = basename($path);
+
+            if (! $this->isSafeName($name)) {
+                continue;
+            }
+
+            $files[] = ['name' => $name, 'last_modified' => (int) $this->disk->lastModified($path)];
+        }
+
+        return $files;
+    }
+
+    private function isSafeName(string $storedName): bool
+    {
+        return preg_match('/^[0-9a-f-]{36}\.(jpg|png|webp)$/', $storedName) === 1;
+    }
+
+    private function originalName(UploadedFile $file, string $extension): string
+    {
+        $name = basename(str_replace('\\', '/', $file->getClientOriginalName()));
+        $name = trim((string) preg_replace('/[\x00-\x1F\x7F]+/u', '', $name));
+
+        if ($name === '') {
+            return 'anexo.'.$extension;
+        }
+
+        return mb_substr($name, 0, 255);
+    }
+}

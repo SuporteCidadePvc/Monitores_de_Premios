@@ -1,0 +1,95 @@
+@extends('admin.layout', ['title' => 'Fecho mensal'])
+
+@section('content')
+    <div class="dashboard-page">
+        <header class="dashboard-topbar">
+            <p class="dashboard-topbar__title"><img class="dashboard-topbar__logo" src="{{ asset('assets/images/Logotipo-admin.png') }}" alt="" aria-hidden="true"> Fecho mensal</p>
+            <div class="dashboard-topbar__actions">
+                <a class="dashboard-button dashboard-button--secondary" href="{{ route('admin.monthly-prize-history.index') }}">Consultar histórico</a>
+                <a class="dashboard-button dashboard-button--secondary dashboard-topbar__admin-link" href="{{ route('admin.dashboard') }}">← Administração</a>
+            </div>
+        </header>
+
+        <main class="dashboard-main">
+            <section class="dashboard-hero" aria-labelledby="closing-title">
+                <div class="dashboard-hero__content">
+                    <p class="dashboard-kicker">Monitores de Prémios</p>
+                    <h1 id="closing-title">Fechar prémio mensal</h1>
+                    <p>Consulte a produção, confirme o cálculo e grave definitivamente o prémio do mês.</p>
+                </div>
+            </section>
+
+            <div class="dashboard-content">
+                @if ($errors->any())
+                    <section class="dashboard-notice dashboard-notice--warning" role="alert">
+                        <h2>Não foi possível preparar o fecho</h2>
+                        @foreach ($errors->all() as $error)<p>{{ $error }}</p>@endforeach
+                    </section>
+                @endif
+
+                <section class="dashboard-section" aria-labelledby="closing-form-title">
+                    <div class="dashboard-section__heading">
+                        <h2 id="closing-form-title"><span class="dashboard-section__icon" aria-hidden="true">▣</span> Dados do mês</h2>
+                        <p>A produção é consultada no servidor. Introduza apenas o setor, o mês e as horas reais.</p>
+                    </div>
+
+                    <form class="dashboard-card dashboard-rule-create" method="POST" action="{{ route('admin.monthly-prize-closing.preview') }}">
+                        @csrf
+                        <div class="dashboard-field">
+                            <label for="closing-sector">Setor</label>
+                            <select id="closing-sector" name="sector" required>
+                                @foreach ($sectors as $key => $sector)
+                                    <option value="{{ $key }}" @selected(old('sector', $values['sector']) === $key)>{{ $sector['name'] }}</option>
+                                @endforeach
+                            </select>
+                        </div>
+                        <div class="dashboard-field">
+                            <label for="closing-month">Mês</label>
+                            <input id="closing-month" name="month" type="month" value="{{ old('month', $values['month']) }}" required>
+                        </div>
+                        <div class="dashboard-field">
+                            <label for="closing-total-hours">Horas totais do setor</label>
+                            <input id="closing-total-hours" name="total_hours" inputmode="decimal" value="{{ old('total_hours', $values['total_hours']) }}" placeholder="Ex.: 4800,00" required>
+                        </div>
+                        <div class="dashboard-field">
+                            <label for="closing-average-hours">Horas médias individuais</label>
+                            <input id="closing-average-hours" name="average_hours" inputmode="decimal" value="{{ old('average_hours', $values['average_hours']) }}" placeholder="Ex.: 160,00" required>
+                        </div>
+                        <button class="dashboard-button dashboard-button--primary" type="submit">Pré-visualizar fecho</button>
+                    </form>
+                </section>
+
+                @if ($preview)
+                    <section class="dashboard-section" aria-labelledby="closing-preview-title" data-monthly-prize-preview>
+                        <div class="dashboard-section__heading">
+                            <h2 id="closing-preview-title"><span class="dashboard-section__icon" aria-hidden="true">✓</span> Pré-visualização</h2>
+                            <p>Confirme os valores. Ao gravar, a produção, as regras e o prémio serão consultados e calculados novamente.</p>
+                        </div>
+
+                        <div class="dashboard-card">
+                            <dl class="monthly-prize-history-summary-list">
+                                <div><dt>Setor</dt><dd>{{ strtoupper($preview->sectorKey) }}</dd></div>
+                                <div><dt>Período</dt><dd>{{ sprintf('%02d/%04d', $preview->period->month, $preview->period->year) }}</dd></div>
+                                <div><dt>Produção</dt><dd>{{ number_format($preview->squares, 2, ',', '.') }} m²</dd></div>
+                                <div><dt>Escalão aplicado</dt><dd>{{ $preview->minimumSquares === null ? 'Sem escalão' : number_format($preview->minimumSquares, 0, ',', '.').' m²' }}</dd></div>
+                                <div><dt>Versão da regra</dt><dd>{{ $preview->ruleVersion }}</dd></div>
+                                <div><dt>Prémio global</dt><dd>{{ number_format($preview->poolCents / 100, 2, ',', '.') }} €</dd></div>
+                                <div><dt>Prémio médio individual</dt><dd>{{ number_format($preview->averagePrizeCents / 100, 2, ',', '.') }} €</dd></div>
+                            </dl>
+
+                            <form method="POST" action="{{ route('admin.monthly-prize-closing.store') }}">
+                                @csrf
+                                <input type="hidden" name="sector" value="{{ $values['sector'] }}">
+                                <input type="hidden" name="month" value="{{ $values['month'] }}">
+                                <input type="hidden" name="total_hours" value="{{ $values['total_hours'] }}">
+                                <input type="hidden" name="average_hours" value="{{ $values['average_hours'] }}">
+                                <label class="confirm"><input type="checkbox" name="confirm" value="1" required> Confirmo a gravação definitiva deste fecho mensal</label>
+                                <button class="dashboard-button dashboard-button--primary" type="submit">Gravar fecho mensal</button>
+                            </form>
+                        </div>
+                    </section>
+                @endif
+            </div>
+        </main>
+    </div>
+@endsection

@@ -1,0 +1,25 @@
+<?php
+
+namespace App\Domain\Admin;
+
+interface AdminManagementRepository
+{
+    /** @return array{rules:list<array<string, mixed>>,announcements:list<array<string, mixed>>,audit:list<array<string, mixed>>} */
+    public function dashboard(): array;
+
+    public function createPrizeRule(string $sectorKey, int $minimumSquares, int $prizePoolCents, AdminUser $actor): void;
+
+    public function updatePrizeRule(int $id, int $minimumSquares, int $prizePoolCents, AdminUser $actor): void;
+
+    public function deactivatePrizeRule(int $id, AdminUser $actor): void;
+
+    public function deletePrizeRule(int $id, AdminUser $actor): void;
+
+    public function createAnnouncement(string $scope, string $title, string $body, string $startsAt, ?string $endsAt, AdminUser $actor): void;
+
+    public function updateAnnouncement(int $id, string $scope, string $title, string $body, string $startsAt, ?string $endsAt, AdminUser $actor): void;
+
+    public function deactivateAnnouncement(int $id, AdminUser $actor): void;
+
+    public function deleteAnnouncement(int $id, AdminUser $actor): void;
+}
