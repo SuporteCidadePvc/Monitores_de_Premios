@@ -966,6 +966,164 @@ body[data-screen="principal"] .display-footer {
     }
 }
 
+/* Main prize screen: proportions follow the 1752 x 897 reference. */
+body[data-screen="principal"] {
+    --prize-scale: min(1vw, 1.953vh);
+    background:
+        linear-gradient(120deg, rgb(1 9 32 / 75%), rgb(2 31 88 / 42%)),
+        url("../images/Fundo.jpg") center / cover fixed,
+        #03112d;
+}
+
+body[data-screen="principal"] .display-shell {
+    max-width: none;
+    padding: 5.2svh 4.1vw 12.5svh;
+}
+
+body[data-screen="principal"] .display-header {
+    min-height: 17.3svh;
+}
+
+body[data-screen="principal"] .company-logo {
+    align-self: start;
+    width: calc(21 * var(--prize-scale));
+}
+
+body[data-screen="principal"] .settings-link {
+    width: calc(3.54 * var(--prize-scale));
+    height: calc(3.54 * var(--prize-scale));
+    min-width: 36px;
+    min-height: 36px;
+    border-color: rgb(255 255 255 / 70%);
+    border-radius: calc(0.85 * var(--prize-scale));
+    background: transparent;
+}
+
+body[data-screen="principal"] .dashboard-grid {
+    grid-template-columns: minmax(0, 1.164fr) minmax(0, 1fr);
+    gap: 1.8vw;
+}
+
+body[data-screen="principal"] .dashboard-card {
+    min-height: 0;
+    padding: calc(2.57 * var(--prize-scale)) calc(3.14 * var(--prize-scale));
+    border-radius: calc(1.83 * var(--prize-scale));
+    background: rgb(2 10 33 / 88%);
+    box-shadow: none;
+}
+
+body[data-screen="principal"] .dashboard-card--prizes h1 {
+    margin-bottom: calc(1.4 * var(--prize-scale));
+    font-size: calc(2.4 * var(--prize-scale));
+    line-height: 1.43;
+    white-space: nowrap;
+}
+
+body[data-screen="principal"] .prize-table {
+    min-width: 0;
+}
+
+body[data-screen="principal"] .prize-table th,
+body[data-screen="principal"] .prize-table td {
+    padding: calc(0.6 * var(--prize-scale)) calc(0.3 * var(--prize-scale));
+    border-bottom: 2px solid rgb(255 255 255 / 75%);
+    font-size: calc(1.37 * var(--prize-scale));
+    line-height: 1.05;
+    white-space: nowrap;
+}
+
+body[data-screen="principal"] .dashboard-card--squares h2 {
+    margin-bottom: calc(1.8 * var(--prize-scale));
+    font-size: calc(2.74 * var(--prize-scale));
+    letter-spacing: 0;
+}
+
+body[data-screen="principal"] .dashboard-card--squares strong {
+    font-size: calc(8.45 * var(--prize-scale));
+    line-height: 0.9;
+}
+
+body[data-screen="principal"] .dashboard-sector-label {
+    margin-top: calc(2.2 * var(--prize-scale));
+    color: #ffffff;
+    font-family: "Kinetica", "Segoe UI", sans-serif;
+    font-size: calc(1.1 * var(--prize-scale));
+    letter-spacing: 0.08em;
+}
+
+body[data-screen="principal"] .display-footer.visually-hidden {
+    min-height: 0;
+    margin: -1px;
+    padding: 0;
+}
+
+/* Stack the panels on phones so every prize remains readable. */
+@media (max-width: 640px) and (orientation: portrait) {
+    body[data-screen="principal"] {
+        --prize-scale: 8px;
+        height: auto;
+        overflow: auto;
+    }
+
+    body[data-screen="principal"] .display-shell {
+        height: auto;
+        min-height: 100svh;
+        padding: 24px 16px 32px;
+        overflow: visible;
+    }
+
+    body[data-screen="principal"] .display-header {
+        min-height: 100px;
+    }
+
+    body[data-screen="principal"] .company-logo {
+        width: 190px;
+    }
+
+    body[data-screen="principal"] .dashboard-grid {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto auto;
+        gap: 18px;
+        flex: none;
+    }
+
+    body[data-screen="principal"] .dashboard-card {
+        padding: 26px 20px;
+        border-radius: 22px;
+    }
+
+    body[data-screen="principal"] .dashboard-card--prizes h1 {
+        font-size: clamp(17px, 5.3vw, 30px);
+        margin-bottom: 22px;
+    }
+
+    body[data-screen="principal"] .prize-table th,
+    body[data-screen="principal"] .prize-table td {
+        padding-block: 10px;
+        font-size: clamp(10px, 3vw, 16px);
+    }
+
+    body[data-screen="principal"] .prize-table th:first-child {
+        width: 28%;
+    }
+
+    body[data-screen="principal"] .prize-table th:nth-child(2) {
+        width: 29%;
+    }
+
+    body[data-screen="principal"] .prize-table th:last-child {
+        width: 43%;
+    }
+
+    body[data-screen="principal"] .prize-table th {
+        font-size: clamp(9px, 2.7vw, 14px);
+    }
+
+    body[data-screen="principal"] .dashboard-card--squares {
+        min-height: 270px;
+    }
+}
+
 /* Announcement shown as an image: the image fills the whole screen. */
 body[data-announcement-media="image"] {
     height: 100svh;

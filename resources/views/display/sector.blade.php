@@ -149,7 +149,7 @@
 
             </section>
 
-            <footer class="display-footer">
+            <footer class="display-footer visually-hidden">
                 <p>* Os prémios são calculados com base no número de horas trabalhadas no mês. Será informado do seu valor no dia 10 do mês seguinte.</p>
                 <p class="last-update">
                     @if ($snapshot->isCached)
